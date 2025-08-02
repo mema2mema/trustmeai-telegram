@@ -1,67 +1,56 @@
 
-import json
+import os
 import logging
+import asyncio
+import pandas as pd
+import matplotlib.pyplot as plt
+
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from utils import generate_summary, generate_graph, analyze_backtest
-from insight_engine import generate_insight
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-with open('telegram_config.json') as f:
-    config = json.load(f)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-TOKEN = config['bot_token']
+# Enable logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
+# Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('🤖 TrustMe AI Bot is online. Use /summary /log /graph /upload /insight')
+    await update.message.reply_text("Hello from TrustMe AI Telegram Bot!")
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        text = generate_summary()
-        await update.message.reply_text(text)
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+    await update.message.reply_text("📊 Summary module coming soon.")
 
 async def log(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await update.message.reply_document(open('trades.csv', 'rb'))
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+    await update.message.reply_text("📄 Trade logs module coming soon.")
 
 async def graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        generate_graph()
-        await update.message.reply_photo(photo=open('graph.png', 'rb'))
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
-
-async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        file = await update.message.document.get_file()
-        file_path = f"uploaded_backtest.csv"
-        await file.download_to_drive(file_path)
-        summary = analyze_backtest(file_path)
-        await update.message.reply_text(summary)
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+    await update.message.reply_text("📈 Trade graph module coming soon.")
 
 async def insight(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        ai_result = generate_insight("trades.csv")
-        await update.message.reply_text(ai_result)
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+    await update.message.reply_text("🤖 AI Insight module coming soon.")
 
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📂 CSV upload received (processing logic can be added).")
+
+async def start_webhook():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("log", log))
     app.add_handler(CommandHandler("graph", graph))
     app.add_handler(CommandHandler("insight", insight))
-    app.add_handler(MessageHandler(filters.Document.ALL & filters.ATTACHMENT, upload_file))
-    app.run_polling()
+    app.add_handler(MessageHandler(filters.Document.MimeType("text/csv"), upload_file))
+
+    await app.bot.set_webhook(url=WEBHOOK_URL)
+
+    await app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 8000)),
+        webhook_url=WEBHOOK_URL,
+    )
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(start_webhook())
