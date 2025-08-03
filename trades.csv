@@ -1,4 +1,6 @@
-date,time,symbol,side,qty,price,profit
-2025-08-01,12:01:01,BTC/USDT,BUY,0.002,29000,5
-2025-08-01,12:05:30,ETH/USDT,SELL,0.03,1850,8
-2025-08-01,12:10:22,XRP/USDT,BUY,100,0.6,-2
+trade_id,profit
+1,50
+2,-30
+3,70
+4,-20
+5,60

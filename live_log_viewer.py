@@ -3,8 +3,8 @@ import time
 import os
 import telegram
 
-BOT_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
-CHAT_ID = "PASTE_YOUR_CHAT_ID_HERE"
+BOT_TOKEN = "7702985344:AAHdsIcjcL6tvbzCk-VB90bHuaCupEEfE74"
+CHAT_ID = "7862868701"
 
 def send_alert(msg):
     bot = telegram.Bot(token=BOT_TOKEN)
