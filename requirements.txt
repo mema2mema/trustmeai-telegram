@@ -1,5 +1,4 @@
-Flask
-python-telegram-bot[webhooks]
-pandas
+flask
+python-telegram-bot==20.3
 matplotlib
-python-dotenv
+pandas
