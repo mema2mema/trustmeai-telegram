@@ -1,6 +1,5 @@
-python-telegram-bot[webhooks]==20.6
-flask==2.3.3
-gunicorn==21.2.0
-pandas==2.2.1
-matplotlib==3.8.0
+Flask
+python-telegram-bot[webhooks]
+pandas
+matplotlib
 python-dotenv
