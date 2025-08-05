@@ -1,6 +1,5 @@
-
-import os
-from telegram_bot.bot_listener import run_bot
+import asyncio
+from telegram_bot.bot_listener import start_bot
 
 if __name__ == "__main__":
-    run_bot()
+    asyncio.run(start_bot())

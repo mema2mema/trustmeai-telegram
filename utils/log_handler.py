@@ -1,8 +1,7 @@
-
-def handle_log():
+def get_log_text():
     try:
         with open("trades/trades.csv", "r") as file:
-            lines = file.readlines()
-            return "".join(lines[-10:])  # last 10 trades
+            lines = file.readlines()[-5:]
+        return "🧾 Last Trades:\n" + "".join(lines)
     except Exception as e:
-        return f"Error reading log: {str(e)}"
+        return f"Failed to fetch log: {e}"
