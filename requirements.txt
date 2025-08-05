@@ -2,3 +2,4 @@ python-telegram-bot==20.3
 pandas==1.5.3
 numpy==1.23.5
 python-dotenv
+matplotlib==3.7.1
