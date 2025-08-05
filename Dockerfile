@@ -7,7 +7,6 @@ RUN apt-get update && apt-get install -y gcc libpq-dev && rm -rf /var/lib/apt/li
 COPY . .
 
 RUN pip install --upgrade pip \
- && pip install -r requirements.txt
+    && pip install -r requirements.txt
 
-EXPOSE 8000
 CMD ["python", "main.py"]

@@ -1,7 +1,11 @@
+from flask import Flask
 from telegram_bot.bot_listener import start_bot
-from web_alive import app
-import threading
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "TrustMe AI Telegram Bot is running!"
 
 if __name__ == "__main__":
-    threading.Thread(target=start_bot).start()
-    app.run(host="0.0.0.0", port=8000)
+    start_bot()
