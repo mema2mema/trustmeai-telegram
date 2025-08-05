@@ -1,6 +1,4 @@
 @echo off
-:loop
-python telegram_bot.py
-echo Bot crashed. Restarting in 5 seconds...
-timeout /t 5
-goto loop
+echo Running TrustMe AI Telegram Bot...
+python telegram_bot/bot_listener.py
+pause
