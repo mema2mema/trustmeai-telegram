@@ -26,12 +26,6 @@ def webhook():
             send_message(chat_id, "✅ RedTrustBot is now active via webhook!")
         elif text == "/ping":
             send_message(chat_id, "🏓 Pong from Railway!")
-        elif text == "/summary":
-            send_message(chat_id, "📊 Summary not implemented yet.")
-        elif text == "/balance":
-            send_message(chat_id, "💰 Balance: 0 USDT (mock)")
-        elif text == "/withdraw":
-            send_message(chat_id, "🚀 Withdrawal requested. Processing...")
         else:
             send_message(chat_id, f"🤖 You said: {text}")
 
