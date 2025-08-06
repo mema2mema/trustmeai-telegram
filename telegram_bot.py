@@ -9,7 +9,7 @@ RAILWAY_URL = "https://trustmeai-telegram-production.up.railway.app/"
 app = ApplicationBuilder().token(TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Echo bot is live and responding!")
+    await update.message.reply_text("✅ Echo bot is live and webhook is working!")
 
 app.add_handler(CommandHandler("start", start))
 
