@@ -17,18 +17,15 @@ def send_message(chat_id, text):
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = request.get_json()
-
     if "message" in update:
         chat_id = update["message"]["chat"]["id"]
         text = update["message"].get("text", "")
-
         if text == "/start":
             send_message(chat_id, "✅ RedTrustBot is now active via webhook!")
         elif text == "/ping":
             send_message(chat_id, "🏓 Pong from Railway!")
         else:
             send_message(chat_id, f"🤖 You said: {text}")
-
     return {"ok": True}
 
 @app.route("/")
