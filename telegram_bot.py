@@ -5,8 +5,8 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+BOT_TOKEN = "YOUR_REAL_BOT_TOKEN_HERE"
+WEBHOOK_URL = "https://your-railway-url.ngrok-free.app/webhook"
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
