@@ -10,12 +10,12 @@ def webhook():
     update = telegram.Update.de_json(request.get_json(force=True), bot)
     chat_id = update.message.chat.id
     text = update.message.text
-    bot.send_message(chat_id=chat_id, text="Received: " + text)
+    bot.sendMessage(chat_id=chat_id, text="✅ RedTrustBot is now active via webhook!")
     return 'ok'
 
 @app.route('/')
 def index():
-    return 'TrustMe AI Telegram Bot is running!'
+    return '✅ TrustMe AI Bot is running!'
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=8000)
