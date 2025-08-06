@@ -1,38 +1,45 @@
-
 import os
-import requests
 from flask import Flask, request
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
 app = Flask(__name__)
 
-BOT_TOKEN = "YOUR_REAL_BOT_TOKEN_HERE"
-WEBHOOK_URL = "https://your-railway-url.ngrok-free.app/webhook"
-
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
 def send_message(chat_id, text):
-    url = f"{TELEGRAM_API_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
+    url = BASE_URL + "sendMessage"
+    data = {'chat_id': chat_id, 'text': text}
+    requests.post(url, data=data)
 
-@app.route("/", methods=["POST"])
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
-    data = request.get_json()
-    print("🔍 Incoming Telegram data:", data)  # Debug print
+    update = request.get_json()
 
-    if not data or "message" not in data:
-        return "ignored", 200
+    if "message" in update:
+        chat_id = update["message"]["chat"]["id"]
+        text = update["message"].get("text", "")
 
-    chat_id = data["message"]["chat"]["id"]
-    message = data["message"].get("text", "")
+        if text == "/start":
+            send_message(chat_id, "✅ RedTrustBot is now active via webhook!")
+        elif text == "/ping":
+            send_message(chat_id, "🏓 Pong from Railway!")
+        elif text == "/summary":
+            send_message(chat_id, "📊 Summary not implemented yet.")
+        elif text == "/balance":
+            send_message(chat_id, "💰 Balance: 0 USDT (mock)")
+        elif text == "/withdraw":
+            send_message(chat_id, "🚀 Withdrawal requested. Processing...")
+        else:
+            send_message(chat_id, f"🤖 You said: {text}")
 
-    send_message(chat_id, f"✅ Your CHAT_ID is: {chat_id}")
-    return "ok", 200
+    return {"ok": True}
 
-@app.route("/set_webhook", methods=["GET"])
-def set_webhook():
-    set_hook = requests.get(f"{TELEGRAM_API_URL}/setWebhook?url={WEBHOOK_URL}")
-    return set_hook.json()
+@app.route("/")
+def home():
+    return "✅ RedTrustBot is live!"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
