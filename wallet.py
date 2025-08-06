@@ -1,25 +1,38 @@
 
 import json
+import uuid
+from datetime import datetime
 import os
 
-BALANCE_FILE = "balance.json"
+WALLET_PATH = 'wallet_data.json'
+WITHDRAW_HISTORY = 'withdraw_history.csv'
 
-def get_balance():
-    if not os.path.exists(BALANCE_FILE):
-        return 0.0
-    with open(BALANCE_FILE) as f:
-        data = json.load(f)
-    return data.get("balance", 0.0)
+def load_wallet():
+    with open(WALLET_PATH, 'r') as f:
+        return json.load(f)
 
-def request_withdraw(amount):
-    if not os.path.exists(BALANCE_FILE):
-        return "❌ No balance record found."
-    with open(BALANCE_FILE) as f:
-        data = json.load(f)
-    balance = data.get("balance", 0.0)
+def save_wallet(data):
+    with open(WALLET_PATH, 'w') as f:
+        json.dump(data, f, indent=4)
+
+def generate_txid():
+    return str(uuid.uuid4()).replace('-', '')[:16].upper()
+
+def log_withdrawal(amount, txid, status='Processed'):
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    entry = f"{now},{amount},{txid},{status}\n"
+    with open(WITHDRAW_HISTORY, 'a') as f:
+        f.write(entry)
+
+def request_withdrawal(amount):
+    wallet = load_wallet()
+    balance = wallet.get('balance', 0)
+
     if amount > balance:
-        return "❌ Insufficient funds."
-    data["balance"] = round(balance - amount, 2)
-    with open(BALANCE_FILE, "w") as f:
-        json.dump(data, f)
-    return f"✅ Withdraw request submitted: ${amount:.2f}"
+        return f"Insufficient balance. Available: {balance}"
+
+    txid = generate_txid()
+    wallet['balance'] -= amount
+    save_wallet(wallet)
+    log_withdrawal(amount, txid)
+    return f"Withdrawal of {amount} USDT successful!\nTXID: {txid}"
