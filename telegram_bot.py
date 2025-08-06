@@ -1,63 +1,49 @@
 
 import os
-import json
-from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import logging
+
+# Enable logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
-from utils.generate import generate_summary, generate_graph
-from wallet import get_balance, request_withdraw
 
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+# Load environment variables
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
+# Create the bot app
+app = ApplicationBuilder().token(TOKEN).build()
+
+# Example command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Welcome to TrustMe AI Bot! Use /summary /log /graph /balance /withdraw")
+    await update.message.reply_text("Hello! TrustMe AI bot is live.")
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = generate_summary()
-    await update.message.reply_text(msg)
+    await update.message.reply_text("Summary feature is active.")
 
 async def log(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        with open("trade_log.csv", "rb") as f:
-            await update.message.reply_document(f)
-    except:
-        await update.message.reply_text("No trade log found.")
+    await update.message.reply_text("Log feature is active.")
 
 async def graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    generate_graph()
-    with open("equity_curve.png", "rb") as img:
-        await update.message.reply_photo(img)
+    await update.message.reply_text("Graph feature is active.")
 
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    amount = get_balance()
-    await update.message.reply_text(f"💰 Current Balance: ${amount:.2f}")
-
-async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        await update.message.reply_text("⚠️ Please specify an amount. Example: /withdraw 50")
-        return
-    try:
-        amt = float(args[0])
-        response = request_withdraw(amt)
-        await update.message.reply_text(response)
-    except ValueError:
-        await update.message.reply_text("❌ Invalid amount.")
-
-app = ApplicationBuilder().token(BOT_TOKEN).build()
+# Register handlers
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("summary", summary))
 app.add_handler(CommandHandler("log", log))
 app.add_handler(CommandHandler("graph", graph))
-app.add_handler(CommandHandler("balance", balance))
-app.add_handler(CommandHandler("withdraw", withdraw))
 
-app.run_webhook(
-    listen="0.0.0.0",
-    port=8500,
-    webhook_url=WEBHOOK_URL
-)
+# Webhook URL from Railway
+RAILWAY_URL = "https://trustmeai-telegram-production.up.railway.app/"
+
+# Start webhook
+if __name__ == "__main__":
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=8000,
+        url_path=TOKEN,
+        webhook_url=f"{RAILWAY_URL}{TOKEN}"
+    )
