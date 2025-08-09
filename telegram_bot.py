@@ -173,6 +173,17 @@ def webhook(token):
     dispatcher.process_update(update)
     return "OK", 200
 
+
+# --- Legacy compatibility: accept POST "/<TOKEN>" too (old webhook style)
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook_legacy():
+    if not TOKEN:
+        abort(500)
+    ensure_bot()
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "OK", 200
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
