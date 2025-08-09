@@ -15,4 +15,4 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 
 # Start Gunicorn; Railway provides $PORT
-CMD ["sh", "-c", "gunicorn -w 2 -k gthread -b 0.0.0.0:${PORT} telegram_bot:app"]
+CMD ["python", "telegram_bot.py"]
