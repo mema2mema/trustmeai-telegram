@@ -1,5 +1,9 @@
 # wsgi.py
-# This shim ensures Gunicorn can find the Flask app
-from telegram_bot import app as app
+# Gunicorn entrypoint for Railway. Imports Flask app from the telegram_bot package.
+from telegram_bot import app
 
-# redeploy 08/09/2025 13:31:03
+if __name__ == "__main__":
+    # Local run helper (not used on Railway)
+    import os
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
