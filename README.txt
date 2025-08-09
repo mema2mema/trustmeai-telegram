@@ -1,20 +1,11 @@
-# TrustMe AI Telegram (Railway, Gunicorn)
+# TrustMe AI Telegram Bot — All-in-One Build
 
-## Files
-- Dockerfile (Gunicorn production)
-- requirements.txt
-- telegram_bot.py (safe import, webhook at /webhook/<TOKEN>)
+Commands:
+- /start – health check
+- /help – list of commands
+- /summary – calculates stats from trades.csv
+- /log – sends last 20 trades as CSV
+- /graph – sends equity curve image
 
-## Railway Variables
-- TELEGRAM_BOT_TOKEN = <your token>
-
-## Set webhook (PowerShell)
-$TOKEN = "<YOUR_NEW_TELEGRAM_BOT_TOKEN>"
-$BASE  = "https://trustmeai-telegram-production.up.railway.app"
-Invoke-RestMethod -Uri "https://api.telegram.org/bot$TOKEN/deleteWebhook" -Method Post
-Invoke-RestMethod -Uri "https://api.telegram.org/bot$TOKEN/setWebhook" -Method Post -Body @{ url = "$BASE/webhook/$TOKEN" }
-
-## VS Code push (example)
-git add .
-git commit -m "Production: Gunicorn + safe webhook endpoint"
-git push
+Place your real `trades.csv` at repo root or `data/trades.csv` with at least a `pnl` column.
+Webhook path is `/webhook/<TOKEN>`.

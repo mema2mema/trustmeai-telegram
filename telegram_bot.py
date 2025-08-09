@@ -1,15 +1,24 @@
 import os
+import io
+from datetime import datetime
 from flask import Flask, request, abort
 from telegram import Bot, Update
 from telegram.ext import Dispatcher, CommandHandler
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
-# Flask app exported at module top-level for Gunicorn
 app = Flask(__name__)
 
-# Token can be missing at import-time; we don't crash
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
-# Lazy-init PTB so import never fails
+CANDIDATE_PATHS = [
+    os.path.join(os.getcwd(), "trades.csv"),
+    os.path.join(os.getcwd(), "data", "trades.csv"),
+]
+
 bot = None
 dispatcher = None
 
@@ -20,40 +29,150 @@ def ensure_bot():
     if bot is None:
         b = Bot(token=TOKEN)
         d = Dispatcher(bot=b, update_queue=None, workers=0, use_context=True)
-        # Handlers
         d.add_handler(CommandHandler("start", start))
         d.add_handler(CommandHandler("help", help_cmd))
-        # Publish
+        d.add_handler(CommandHandler("summary", summary_cmd))
+        d.add_handler(CommandHandler("log", log_cmd))
+        d.add_handler(CommandHandler("graph", graph_cmd))
         globals()["bot"] = b
         globals()["dispatcher"] = d
     return True
 
-# --- Handlers ---
+def find_trades_csv():
+    for p in CANDIDATE_PATHS:
+        if os.path.exists(p):
+            return p
+    return None
+
+def load_trades():
+    path = find_trades_csv()
+    if not path:
+        return None, "trades.csv not found. Place it at repo root or in data/trades.csv."
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        return None, f"Failed to read trades.csv: {e}"
+    cols = {c.lower().strip(): c for c in df.columns}
+    rename_map = {}
+    ts_col = None
+    for k in ["timestamp","time","date","datetime"]:
+        if k in cols:
+            ts_col = cols[k]; rename_map[ts_col] = "timestamp"; break
+    pnl_col = None
+    for k in ["pnl","profit","pl","p&l"]:
+        if k in cols:
+            pnl_col = cols[k]; rename_map[pnl_col] = "pnl"; break
+    if pnl_col is None:
+        return None, "trades.csv must include a 'pnl' column."
+    df = df.rename(columns=rename_map)
+    if "timestamp" in df.columns:
+        try:
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+        except Exception:
+            pass
+    else:
+        df["timestamp"] = pd.date_range(end=pd.Timestamp.utcnow(), periods=len(df), freq="T")
+    df["pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0.0)
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    return df, None
+
+def equity_curve(pnls):
+    return np.cumsum(pnls)
+
+def max_drawdown(series):
+    peaks = np.maximum.accumulate(series)
+    drawdowns = (series - peaks)
+    return float(drawdowns.min()) if len(series) else 0.0
+
+def summary_text(df):
+    total_trades = int(len(df))
+    wins = int((df["pnl"] > 0).sum())
+    losses = int((df["pnl"] <= 0).sum())
+    win_rate = (wins / total_trades * 100.0) if total_trades else 0.0
+    gross_profit = float(df.loc[df["pnl"] > 0, "pnl"].sum())
+    gross_loss = float(df.loc[df["pnl"] <= 0, "pnl"].sum())
+    net_pnl = float(df["pnl"].sum())
+    avg_pnl = float(df["pnl"].mean()) if total_trades else 0.0
+    profit_factor = (gross_profit / abs(gross_loss)) if gross_loss < 0 else float("inf") if gross_profit>0 else 0.0
+    eq = equity_curve(df["pnl"].values)
+    mdd = max_drawdown(eq)
+    lines = [
+        "📈 *TrustMe AI – Performance Summary*",
+        f"• Trades: *{total_trades}*",
+        f"• Wins / Losses: *{wins}* / *{losses}*",
+        f"• Win rate: *{win_rate:.2f}%*",
+        f"• Net PnL: *{net_pnl:.2f}*",
+        f"• Avg PnL / trade: *{avg_pnl:.4f}*",
+        f"• Profit Factor: *{profit_factor:.2f}*",
+        f"• Max Drawdown: *{mdd:.2f}*",
+    ]
+    return "\n".join(lines)
+
 def start(update, context):
-    update.message.reply_text("✅ TrustMe AI Bot is running! Send /help for options.")
+    update.message.reply_text("✅ TrustMe AI Bot is running! Commands: /help /summary /log /graph")
 
 def help_cmd(update, context):
-    update.message.reply_text("Commands:\n/start – check bot\n/help – this menu")
+    update.message.reply_text(
+        "Commands:\n"
+        "/start – health check\n"
+        "/help – this menu\n"
+        "/summary – performance summary from trades.csv\n"
+        "/log – last 20 trades (sends CSV)\n"
+        "/graph – equity curve image"
+    )
 
-# --- Routes ---
+def summary_cmd(update, context):
+    df, err = load_trades()
+    if err:
+        update.message.reply_text(f"❌ {err}")
+        return
+    text = summary_text(df)
+    context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='Markdown')
+
+def log_cmd(update, context):
+    df, err = load_trades()
+    if err:
+        update.message.reply_text(f"❌ {err}")
+        return
+    tail = df.tail(20)
+    csv_bytes = tail.to_csv(index=False).encode("utf-8")
+    bio = io.BytesIO(csv_bytes)
+    bio.name = "trades_tail.csv"
+    context.bot.send_document(chat_id=update.effective_chat.id, document=bio, filename="trades_tail.csv", caption="Last 20 trades")
+
+def graph_cmd(update, context):
+    df, err = load_trades()
+    if err:
+        update.message.reply_text(f"❌ {err}")
+        return
+    eq = equity_curve(df["pnl"].values)
+    plt.figure()
+    plt.plot(df["timestamp"], eq)
+    plt.title("Equity Curve")
+    plt.xlabel("Time")
+    plt.ylabel("Equity (cumulative PnL)")
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png")
+    plt.close()
+    buf.seek(0)
+    context.bot.send_photo(chat_id=update.effective_chat.id, photo=buf, caption="📊 Equity Curve")
+
 @app.route("/", methods=["GET"])
 def health():
     if not TOKEN:
         return "❌ Missing TELEGRAM_BOT_TOKEN env var", 500
     return "✅ TrustMe AI Bot is running!", 200
 
-# Webhook endpoint that does not require token at import
 @app.route("/webhook/<path:token>", methods=["POST"])
 def webhook(token):
     if not TOKEN or token != TOKEN:
         abort(403)
-    if not ensure_bot():
-        abort(500)
+    ensure_bot()
     update = Update.de_json(request.get_json(force=True), bot)
     dispatcher.process_update(update)
     return "OK", 200
 
-# Local dev server (not used on Railway)
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
