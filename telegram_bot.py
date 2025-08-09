@@ -1,32 +1,35 @@
-from flask import Flask, request
 import os
-import telegram
+from flask import Flask, request
+from telegram import Bot, Update
+from telegram.ext import Dispatcher, CommandHandler
 
-# --- Read token from environment (DO NOT hardcode) ---
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN is not set. Configure it in Railway -> Variables.")
+    raise RuntimeError("Missing TELEGRAM_BOT_TOKEN env var")
 
-bot = telegram.Bot(token=TOKEN)
 app = Flask(__name__)
 
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    update = telegram.Update.de_json(request.get_json(force=True), bot)
-    chat_id = update.message.chat.id
-    text = update.message.text or ""
+bot = Bot(token=TOKEN)
+dispatcher = Dispatcher(bot=bot, update_queue=None, workers=0, use_context=True)
 
-    if text.strip().lower() == "/start":
-        bot.send_message(chat_id=chat_id, text="✅ RedTrustBot (webhook) is online!")
-    elif text.strip().lower() == "/ping":
-        bot.send_message(chat_id=chat_id, text="🏓 Pong (Railway).")
-    else:
-        bot.send_message(chat_id=chat_id, text=f"🤖 You said: {text}")
-    return "ok"
+def start(update, context):
+    update.message.reply_text("✅ TrustMe AI Bot is running! Send /help for options.")
+
+def help_cmd(update, context):
+    update.message.reply_text("Commands:\n/start – check bot\n/help – this menu")
+
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CommandHandler("help", help_cmd))
 
 @app.route("/", methods=["GET"])
 def health():
-    return "✅ TrustMe AI Telegram webhook is running!"
+    return "✅ TrustMe AI Bot is running!", 200
+
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "OK", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
