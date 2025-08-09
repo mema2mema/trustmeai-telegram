@@ -1,5 +1,4 @@
 # telegram_bot/__init__.py
-# Clean, de-indented file to fix IndentationError at import time.
 import os
 import io
 import time
@@ -17,7 +16,6 @@ import json
 
 app = Flask(__name__)
 
-# --- Config ---
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 DATA_DIR = os.path.join(os.getcwd(), "data")
@@ -27,7 +25,6 @@ WALLET_PATH = os.path.join(DATA_DIR, "wallet.json")
 SUMMARY_HOUR_UTC = int(os.environ.get("SUMMARY_HOUR_UTC", "8"))
 SUMMARY_MINUTE = int(os.environ.get("SUMMARY_MINUTE", "0"))
 
-# --- Telegram (lazy init) ---
 bot = None
 dispatcher = None
 bg_started = False
@@ -51,7 +48,6 @@ def ensure_bot():
         dispatcher = d
     return True
 
-# ---------- Helpers ----------
 def find_trades_csv():
     for p in TRADES_PATHS:
         if os.path.exists(p):
@@ -114,7 +110,6 @@ def write_wallet(w):
     except Exception:
         pass
 
-# ---------- Background loops ----------
 def watch_trades_loop():
     global last_rows
     while True:
@@ -188,7 +183,6 @@ def start_background_once():
         t1.start(); t2.start()
         bg_started = True
 
-# ---------- Commands ----------
 def start(update, context):
     start_background_once()
     update.message.reply_text("✅ Live alerts ON. Use /help for commands.")
@@ -268,7 +262,6 @@ def upload_csv(update, context):
     except Exception as e:
         update.message.reply_text(f"❌ Upload failed: {e}")
 
-# ---------- Routes ----------
 @app.route("/", methods=["GET"])
 def health():
     start_background_once()

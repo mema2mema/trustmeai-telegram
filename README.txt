@@ -1,11 +1,20 @@
-# TrustMe AI Telegram Bot — All-in-One Build
+# TrustMe AI Telegram — Final Backup (Production Ready)
+Stable working bot with live alerts, daily summaries, wallet, CSV upload, dual webhooks.
 
-Commands:
-- /start – health check
-- /help – list of commands
-- /summary – calculates stats from trades.csv
-- /log – sends last 20 trades as CSV
-- /graph – sends equity curve image
+## Railway Variables
+TELEGRAM_BOT_TOKEN=your token
+CHAT_ID=your chat id
+SUMMARY_HOUR_UTC=8
+SUMMARY_MINUTE=0
 
-Place your real `trades.csv` at repo root or `data/trades.csv` with at least a `pnl` column.
-Webhook path is `/webhook/<TOKEN>`.
+## Webhook
+Accepts both `/webhook/<TOKEN>` and `/<TOKEN>`.
+
+## Deploy
+git add .
+git commit -m "Final production-ready bot"
+git push -u origin main
+
+## Local
+pip install -r requirements.txt
+python telegram_bot/__init__.py
