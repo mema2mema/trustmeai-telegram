@@ -1,174 +1,291 @@
-# telegram_bot/__init__.py
-# Unified Flask app with Telegram handlers and webhook routes.
-import os
-import io
-from flask import Flask, request, abort
-from telegram import Bot, Update
-from telegram.ext import Dispatcher, CommandHandler
-import pandas as pd
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+    # telegram_bot/__init__.py
+    # AutoSuite: live trade alerts, daily summaries, wallet updates, dual webhooks.
+    import os
+    import io
+    import time
+    import threading
+    from datetime import datetime, timezone
+    from flask import Flask, request, abort
+    from telegram import Bot, Update
+    from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters
+    import pandas as pd
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import json
 
-# Create the Flask app that Gunicorn will import via wsgi:app
-app = Flask(__name__)
+    app = Flask(__name__)
 
-# Read token (don't crash if missing so the app can at least boot)
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    # --- Config ---
+    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    CHAT_ID = os.environ.get("CHAT_ID", "")  # optional; if missing, alerts are skipped
+    DATA_DIR = os.path.join(os.getcwd(), "data")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    TRADES_PATHS = [os.path.join(DATA_DIR, "trades.csv"), os.path.join(os.getcwd(), "trades.csv")]
+    WALLET_PATH = os.path.join(DATA_DIR, "wallet.json")
+    SUMMARY_HOUR_UTC = int(os.environ.get("SUMMARY_HOUR_UTC", "8"))  # 08:00 UTC default
+    SUMMARY_MINUTE = int(os.environ.get("SUMMARY_MINUTE", "0"))
 
-# Optional CSV locations
-CANDIDATE_PATHS = [
-    os.path.join(os.getcwd(), "trades.csv"),
-    os.path.join(os.getcwd(), "data", "trades.csv"),
-]
+    # --- Telegram (lazy init so import never fails) ---
+    bot = None
+    dispatcher = None
+    bg_started = False
+    last_rows = -1  # track last processed row count
 
-# Lazy-init Telegram dispatcher so import never fails if envvar missing
-bot = None
-dispatcher = None
+    def ensure_bot():
+        global bot, dispatcher
+        if not TOKEN:
+            return False
+        if bot is None:
+            b = Bot(token=TOKEN)
+            d = Dispatcher(bot=b, update_queue=None, workers=0, use_context=True)
+            # Commands
+            d.add_handler(CommandHandler("start", start))
+            d.add_handler(CommandHandler("help", help_cmd))
+            d.add_handler(CommandHandler("summary", summary_cmd))
+            d.add_handler(CommandHandler("log", log_cmd))
+            d.add_handler(CommandHandler("graph", graph_cmd))
+            d.add_handler(CommandHandler("status", status_cmd))
+            # Upload CSV handler
+            d.add_handler(MessageHandler(Filters.document.mime_type("text/csv"), upload_csv))
+            bot = b
+            dispatcher = d
+        return True
 
-def ensure_bot():
-    """Ensure PTB Bot + Dispatcher exist before processing an update."""
-    global bot, dispatcher
-    if not TOKEN:
-        return False
-    if bot is None:
-        b = Bot(token=TOKEN)
-        d = Dispatcher(bot=b, update_queue=None, workers=0, use_context=True)
-        # Register command handlers
-        d.add_handler(CommandHandler("start", start))
-        d.add_handler(CommandHandler("help", help_cmd))
-        d.add_handler(CommandHandler("summary", summary_cmd))
-        d.add_handler(CommandHandler("log", log_cmd))
-        d.add_handler(CommandHandler("graph", graph_cmd))
-        bot = b
-        dispatcher = d
-    return True
+    # ---------- Helpers ----------
+    def find_trades_csv():
+        for p in TRADES_PATHS:
+            if os.path.exists(p):
+                return p
+        return None
 
-# ---------- Helpers for /summary,/log,/graph ----------
-def find_trades_csv():
-    for p in CANDIDATE_PATHS:
-        if os.path.exists(p):
-            return p
-    return None
-
-def load_trades():
-    path = find_trades_csv()
-    if not path:
-        return None, "trades.csv not found. Place it at repo root or in data/trades.csv."
-    try:
-        df = pd.read_csv(path)
-    except Exception as e:
-        return None, f"Failed to read trades.csv: {e}"
-    cols = {c.lower().strip(): c for c in df.columns}
-    rename_map = {}
-    # Timestamp
-    ts_col = None
-    for k in ["timestamp","time","date","datetime"]:
-        if k in cols:
-            ts_col = cols[k]; rename_map[ts_col] = "timestamp"; break
-    # PnL
-    pnl_col = None
-    for k in ["pnl","profit","pl","p&l"]:
-        if k in cols:
-            pnl_col = cols[k]; rename_map[pnl_col] = "pnl"; break
-    if pnl_col is None:
-        return None, "trades.csv must include a 'pnl' column."
-    df = df.rename(columns=rename_map)
-    if "timestamp" in df.columns:
+    def load_trades():
+        path = find_trades_csv()
+        if not path:
+            return None, "trades.csv not found. Upload one or place it in data/trades.csv."
         try:
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df = pd.read_csv(path)
+        except Exception as e:
+            return None, f"Failed reading trades.csv: {e}"
+        cols = {c.lower().strip(): c for c in df.columns}
+        rename = {}
+        for k in ["timestamp","time","date","datetime"]:
+            if k in cols:
+                rename[cols[k]] = "timestamp"; break
+        pnl_col = None
+        for k in ["pnl","profit","pl","p&l","profit_usd","profitusdt"]:
+            if k in cols:
+                pnl_col = cols[k]; rename[pnl_col] = "pnl"; break
+        if pnl_col is None:
+            return None, "CSV must include a 'pnl' column."
+        df = df.rename(columns=rename)
+        if "timestamp" in df.columns:
+            try:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+            except Exception:
+                pass
+        else:
+            df["timestamp"] = pd.date_range(end=pd.Timestamp.utcnow(), periods=len(df), freq="T")
+        df["pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0.0)
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df, None
+
+    def equity_curve(pnls):
+        return np.cumsum(pnls)
+
+    def max_drawdown(series):
+        peaks = np.maximum.accumulate(series)
+        dd = series - peaks
+        return float(dd.min()) if len(series) else 0.0
+
+    def read_wallet():
+        if os.path.exists(WALLET_PATH):
+            try:
+                return json.load(open(WALLET_PATH, "r", encoding="utf-8"))
+            except Exception:
+                pass
+        # default wallet
+        return {"balance": 1000.0, "currency": "USDT"}
+
+    def write_wallet(w):
+        try:
+            json.dump(w, open(WALLET_PATH, "w", encoding="utf-8"))
         except Exception:
             pass
-    else:
-        df["timestamp"] = pd.date_range(end=pd.Timestamp.utcnow(), periods=len(df), freq="T")
-    df["pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0.0)
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    return df, None
 
-def equity_curve(pnls):
-    return np.cumsum(pnls)
+    # ---------- Background loops ----------
+    def watch_trades_loop():
+        global last_rows
+        while True:
+            try:
+                path = find_trades_csv()
+                if path and ensure_bot() and CHAT_ID:
+                    df = pd.read_csv(path)
+                    rows = len(df)
+                    if last_rows == -1:
+                        last_rows = rows
+                    elif rows > last_rows:
+                        new = df.iloc[last_rows:]
+                        wallet = read_wallet()
+                        bal = float(wallet.get("balance", 0.0))
+                        for _, r in new.iterrows():
+                            pnl = float(pd.to_numeric(r.get("pnl", 0.0), errors="coerce") or 0.0)
+                            bal += pnl
+                            msg = (
+                                "📣 *Live Trade Alert*
+"
+                                f"• Symbol: *{r.get('symbol','?')}*
+"
+                                f"• Side: *{r.get('side','?')}*
+"
+                                f"• Qty: *{r.get('qty','?')}* @ *{r.get('price','?')}*
+"
+                                f"• PnL: *{pnl:.2f}*
+"
+                                f"• New Balance: *{bal:.2f} {wallet.get('currency','USDT')}*"
+                            )
+                            try:
+                                bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
+                            except Exception as e:
+                                print("send_message failed:", e)
+                        wallet["balance"] = bal
+                        write_wallet(wallet)
+                        last_rows = rows
+                time.sleep(5)
+            except Exception as e:
+                print("watch_trades_loop error:", e)
+                time.sleep(5)
 
-def max_drawdown(series):
-    peaks = np.maximum.accumulate(series)
-    drawdowns = (series - peaks)
-    return float(drawdowns.min()) if len(series) else 0.0
+    def daily_summary_loop():
+        sent_day = None
+        while True:
+            try:
+                now = datetime.now(timezone.utc)
+                if now.hour == SUMMARY_HOUR_UTC and now.minute == SUMMARY_MINUTE:
+                    if sent_day != now.date() and ensure_bot() and CHAT_ID:
+                        df, err = load_trades()
+                        if not err:
+                            eq = equity_curve(df["pnl"].values)
+                            mdd = max_drawdown(eq)
+                            text = (
+                                "🗓️ *Daily Summary*
+"
+                                f"• Trades: *{len(df)}*
+"
+                                f"• Net PnL: *{float(df['pnl'].sum()):.2f}*
+"
+                                f"• Max DD: *{mdd:.2f}*"
+                            )
+                            try:
+                                bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
+                            except Exception as e:
+                                print("daily send failed:", e)
+                        sent_day = now.date()
+                time.sleep(60)
+            except Exception as e:
+                print("daily_summary_loop error:", e)
+                time.sleep(60)
 
-def summary_text(df):
-    total_trades = int(len(df))
-    wins = int((df["pnl"] > 0).sum())
-    losses = int((df["pnl"] <= 0).sum())
-    win_rate = (wins / total_trades * 100.0) if total_trades else 0.0
-    gross_profit = float(df.loc[df["pnl"] > 0, "pnl"].sum())
-    gross_loss = float(df.loc[df["pnl"] <= 0, "pnl"].sum())
-    net_pnl = float(df["pnl"].sum())
-    avg_pnl = float(df["pnl"].mean()) if total_trades else 0.0
-    profit_factor = (gross_profit / abs(gross_loss)) if gross_loss < 0 else float("inf") if gross_profit>0 else 0.0
-    eq = equity_curve(df["pnl"].values)
-    mdd = max_drawdown(eq)
-    return "\n".join([
-        "📈 *TrustMe AI – Performance Summary*",
-        f"• Trades: *{total_trades}*",
-        f"• Wins / Losses: *{wins}* / *{losses}*",
-        f"• Win rate: *{win_rate:.2f}%*",
-        f"• Net PnL: *{net_pnl:.2f}*",
-        f"• Avg PnL / trade: *{avg_pnl:.4f}*",
-        f"• Profit Factor: *{profit_factor:.2f}*",
-        f"• Max Drawdown: *{mdd:.2f}*",
-    ])
+    def start_background_once():
+        global bg_started
+        if not bg_started:
+            t1 = threading.Thread(target=watch_trades_loop, daemon=True)
+            t2 = threading.Thread(target=daily_summary_loop, daemon=True)
+            t1.start(); t2.start()
+            bg_started = True
 
-# ---------- Telegram command handlers ----------
-def start(update, context):
-    update.message.reply_text("✅ TrustMe AI Bot is running! Commands: /help /summary /log /graph")
+    # ---------- Commands ----------
+    def start(update, context):
+        start_background_once()
+        update.message.reply_text("✅ Live alerts ON. Use /help for commands.")
 
-def help_cmd(update, context):
-    update.message.reply_text(
-        "Commands:\n"
-        "/start – health check\n"
-        "/help – this menu\n"
-        "/summary – performance summary from trades.csv\n"
-        "/log – last 20 trades (sends CSV)\n"
-        "/graph – equity curve image"
-    )
+    def help_cmd(update, context):
+        update.message.reply_text(
+            "Commands:\n"
+            "/start – enable background alerts\n"
+            "/help – this menu\n"
+            "/summary – performance summary from trades.csv\n"
+            "/log – last 20 trades (sends CSV)\n"
+            "/graph – equity curve image\n"
+            "/status – wallet + csv status\n"
+            "Send a CSV file to update trades."
+        )
 
-def summary_cmd(update, context):
-    df, err = load_trades()
-    if err:
-        update.message.reply_text(f"❌ {err}"); return
-    context.bot.send_message(chat_id=update.effective_chat.id, text=summary_text(df), parse_mode='Markdown')
+    def status_cmd(update, context):
+        path = find_trades_csv()
+        wallet = read_wallet()
+        msg = f"📄 CSV: {path or 'not found'}\n💰 Balance: {wallet.get('balance',0):.2f} {wallet.get('currency','USDT')}"
+        update.message.reply_text(msg)
 
-def log_cmd(update, context):
-    df, err = load_trades()
-    if err:
-        update.message.reply_text(f"❌ {err}"); return
-    tail = df.tail(20)
-    csv_bytes = tail.to_csv(index=False).encode("utf-8")
-    bio = io.BytesIO(csv_bytes); bio.name = "trades_tail.csv"
-    context.bot.send_document(chat_id=update.effective_chat.id, document=bio, filename="trades_tail.csv", caption="Last 20 trades")
+    def summary_cmd(update, context):
+        df, err = load_trades()
+        if err:
+            update.message.reply_text(f"❌ {err}"); return
+        # Build summary
+        total = len(df)
+        wins = int((df["pnl"]>0).sum()); losses = total - wins
+        win_rate = (wins/total*100) if total else 0.0
+        net = float(df["pnl"].sum())
+        eq = equity_curve(df["pnl"].values); mdd = max_drawdown(eq)
+        text = (
+            "📈 *Summary*\n"
+            f"• Trades: *{total}*\n"
+            f"• Win rate: *{win_rate:.2f}%*\n"
+            f"• Net PnL: *{net:.2f}*\n"
+            f"• Max DD: *{mdd:.2f}*"
+        )
+        context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode='Markdown')
 
-def graph_cmd(update, context):
-    df, err = load_trades()
-    if err:
-        update.message.reply_text(f"❌ {err}"); return
-    eq = equity_curve(df["pnl"].values)
-    import matplotlib.pyplot as plt
-    plt.figure(); plt.plot(df["timestamp"], eq); plt.title("Equity Curve"); plt.xlabel("Time"); plt.ylabel("Equity (cum PnL)"); plt.tight_layout()
-    buf = io.BytesIO(); plt.savefig(buf, format="png"); plt.close(); buf.seek(0)
-    context.bot.send_photo(chat_id=update.effective_chat.id, photo=buf, caption="📊 Equity Curve")
+    def log_cmd(update, context):
+        df, err = load_trades()
+        if err:
+            update.message.reply_text(f"❌ {err}"); return
+        tail = df.tail(20)
+        csv_bytes = tail.to_csv(index=False).encode("utf-8")
+        bio = io.BytesIO(csv_bytes); bio.name = "trades_tail.csv"
+        context.bot.send_document(chat_id=update.effective_chat.id, document=bio, filename="trades_tail.csv", caption="Last 20 trades")
 
-# ---------- Flask routes ----------
-@app.route("/", methods=["GET"])
-def health():
-    if not TOKEN:
-        return "❌ Missing TELEGRAM_BOT_TOKEN env var", 500
-    return "✅ TrustMe AI Bot is running!", 200
+    def graph_cmd(update, context):
+        df, err = load_trades()
+        if err:
+            update.message.reply_text(f"❌ {err}"); return
+        eq = equity_curve(df["pnl"].values)
+        plt.figure()
+        plt.plot(df["timestamp"], eq)
+        plt.title("Equity Curve")
+        plt.xlabel("Time"); plt.ylabel("Equity (cum PnL)")
+        plt.tight_layout()
+        buf = io.BytesIO(); plt.savefig(buf, format="png"); plt.close(); buf.seek(0)
+        context.bot.send_photo(chat_id=update.effective_chat.id, photo=buf, caption="📊 Equity Curve")
 
-# Accept both /webhook/<TOKEN> (new) and /<TOKEN> (legacy)
-@app.route(f"/webhook/{TOKEN}", methods=["POST"])
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook_any():
-    if not ensure_bot():
-        abort(500)
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return "OK", 200
+    def upload_csv(update, context):
+        try:
+            file = update.message.document
+            if not file.file_name.lower().endswith(".csv"):
+                update.message.reply_text("❌ Please send a .csv file."); return
+            fobj = context.bot.getFile(file.file_id)
+            dest = TRADES_PATHS[0]
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            fobj.download(custom_path=dest)
+            update.message.reply_text("✅ CSV uploaded. Alerts and summaries will use the new file.")
+        except Exception as e:
+            update.message.reply_text(f"❌ Upload failed: {e}")
+
+    # ---------- Routes ----------
+    @app.route("/", methods=["GET"])
+    def health():
+        start_background_once()
+        if not TOKEN:
+            return "❌ Missing TELEGRAM_BOT_TOKEN env var", 500
+        return "✅ TrustMe AI Bot is running!", 200
+
+    # Accept both /webhook/<TOKEN> and /<TOKEN>
+    @app.route(f"/webhook/{TOKEN}", methods=["POST"])
+    @app.route(f"/{TOKEN}", methods=["POST"])
+    def webhook_any():
+        ensure_bot()
+        start_background_once()
+        update = Update.de_json(request.get_json(force=True), bot)
+        dispatcher.process_update(update)
+        return "OK", 200

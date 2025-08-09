@@ -1,4 +1,4 @@
-# Dockerfile (Production - Gunicorn)
+# Dockerfile (Production - Gunicorn, single worker)
 FROM python:3.11-slim
 WORKDIR /app
 
@@ -11,4 +11,5 @@ COPY . .
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["sh", "-c", "gunicorn -w 2 -k gthread -b 0.0.0.0:${PORT} wsgi:app"]
+# Single worker avoids duplicate background threads
+CMD ["sh", "-c", "gunicorn -w 1 -k gthread -b 0.0.0.0:${PORT} wsgi:app"]
