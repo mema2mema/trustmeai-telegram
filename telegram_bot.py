@@ -31,6 +31,7 @@ def webhook():
     dispatcher.process_update(update)
     return "OK", 200
 
+# Keep dev server for local runs only
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
