@@ -11,4 +11,4 @@ COPY . .
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["sh", "-c", "gunicorn -w 2 -k gthread -b 0.0.0.0:${PORT} telegram_bot:app"]
+CMD ["sh", "-c", "gunicorn -w 2 -k gthread -b 0.0.0.0:${PORT} wsgi:app"]
