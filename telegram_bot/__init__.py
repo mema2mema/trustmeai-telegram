@@ -162,6 +162,10 @@ def start_background_once():
         threading.Thread(target=daily_summary_loop, daemon=True).start()
         bg_started = True
 
+def _public_base():
+    # Always use https in messages
+    return request.url_root.replace("http://", "https://").rstrip("/")
+
 # Commands
 def start(update, context):
     start_background_once()
@@ -183,11 +187,9 @@ def help_cmd(update, context):
 def status_cmd(update, context):
     path = find_trades_csv()
     wallet = read_wallet()
-    base = request.url_root.rstrip("/")  # public base URL
-    csv_url = f"{base}/files/trades.csv" if path else "not found"
+    csv_url = f"{_public_base()}/files/trades.csv" if path else "not found"
     msg = f"📄 CSV: {csv_url}\n💰 Balance: {wallet.get('balance',0):.2f} {wallet.get('currency','USDT')}"
     update.message.reply_text(msg)
-    # attach file too
     if path and os.path.exists(path):
         try:
             with open(path, "rb") as f:
@@ -201,8 +203,7 @@ def trades_cmd(update, context):
     if not path or not os.path.exists(path):
         update.message.reply_text("❌ trades.csv not found. Upload a CSV or place it in data/trades.csv.")
         return
-    base = request.url_root.rstrip("/")
-    csv_url = f"{base}/files/trades.csv"
+    csv_url = f"{_public_base()}/files/trades.csv"
     update.message.reply_text(f"🔗 Download: {csv_url}")
     try:
         with open(path, "rb") as f:
@@ -258,10 +259,15 @@ def download_trades():
     path = find_trades_csv()
     if not path or not os.path.exists(path):
         return "trades.csv not found", 404
-    return send_from_directory(directory=os.path.dirname(path),
-                               path=os.path.basename(path),
+    directory = os.path.dirname(path)
+    filename = os.path.basename(path)
+    # Explicit CSV mimetype and no caching
+    return send_from_directory(directory=directory,
+                               path=filename,
                                as_attachment=True,
-                               download_name="trades.csv")
+                               mimetype="text/csv",
+                               download_name="trades.csv",
+                               max_age=0)
 
 # Health & webhooks
 @app.route("/", methods=["GET"])
