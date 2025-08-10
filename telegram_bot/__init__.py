@@ -122,6 +122,31 @@ def _auto_time_col(df: pd.DataFrame):
         return best
     return None
 
+def _auto_symbol_col(df: pd.DataFrame):
+    # Exact matches first
+    for name in SYMBOL_CANDIDATES:
+        for c in df.columns:
+            if str(c).strip().lower() == name:
+                return c
+    # Fuzzy regex match
+    pattern = re.compile(r"(symbol|pair|market|ticker|instrument|asset|coin)", re.IGNORECASE)
+    for c in df.columns:
+        if pattern.search(str(c)):
+            return c
+    # Heuristic: most repeated short-ish string column
+    candidates = []
+    for c in df.columns:
+        s = df[c]
+        if s.dtype == object:
+            uniq = s.dropna().astype(str).str.upper().unique()
+            if 1 < len(uniq) < max(50, len(s)//2):
+                candidates.append((c, len(uniq)))
+    if candidates:
+        candidates.sort(key=lambda x: x[1])
+        return candidates[0][0]
+    return None
+
+# ---------------- Stats & formatting ----------------
 def _equity_curve(pnl: pd.Series) -> pd.Series:
     r = pd.to_numeric(pnl, errors="coerce").fillna(0.0).astype(float)
     return r.cumsum()
@@ -181,7 +206,7 @@ def _build_summary_digest():
     block = _summary_html(df, pcol).replace("📊 Performance", "📊 Daily Digest")
     return block
 
-# ---------------- Helpers ----------------
+# ---------------- Parsers & filters ----------------
 def _parse_args(args_text: str):
     out = {}
     if args_text:
@@ -270,14 +295,12 @@ def digeststatus_cmd(update, context):
 
 def digest_cmd(update, context):
     try:
-        # accept many variants
         arg = " ".join(context.args).strip().lower() if context.args else ""
-        arg = re.sub(r"[^a-z0-9: ]+", "", arg)  # strip parentheses or punctuation
+        arg = re.sub(r"[^a-z0-9: ]+", "", arg)
         if arg in ("on","enable","start","1","true"):
             with open(DIGEST_FILE, "w") as f:
                 f.write(str(update.effective_chat.id))
             _schedule_digest()
-            # show time
             t = "09:00"
             if os.path.exists(DIGEST_TIME_FILE):
                 t = open(DIGEST_TIME_FILE).read().strip() or t
@@ -289,7 +312,6 @@ def digest_cmd(update, context):
             _schedule_digest()
             update.message.reply_text("❌ Daily digest OFF")
             return
-        # if no/unknown arg, show status + usage
         digeststatus_cmd(update, context)
         update.message.reply_text("Usage: /digest on|off")
     except Exception as e:
@@ -315,15 +337,8 @@ def digesttime_cmd(update, context):
     except Exception:
         update.message.reply_text("❌ Invalid time format. Use HH:MM (24h UTC).")
 
-# Minimal versions of summary/graph/columns/trades to keep file short
-def _build_summary_digest():
-    df = _read_csv_safely(TRADES_PATH)
-    if df.empty:
-        return "<b>📊 Daily Digest</b>\n<pre>No trades</pre>"
-    pcol = _auto_profit_col(df)
-    if not pcol:
-        return "<b>📊 Daily Digest</b>\n<pre>No profit column</pre>"
-    return _summary_html(df, pcol).replace("📊 Performance", "📊 Daily Digest")
+def status_cmd(update, context):
+    update.effective_message.reply_text(f"TRADES_PATH: {TRADES_PATH}")
 
 def columns_cmd(update, context):
     try:
@@ -346,9 +361,6 @@ def columns_cmd(update, context):
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /columns: {e}")
 
-def status_cmd(update, context):
-    update.effective_message.reply_text(f"TRADES_PATH: {TRADES_PATH}")
-
 def trades_cmd(update, context):
     try:
         if not os.path.exists(TRADES_PATH):
@@ -368,22 +380,123 @@ def summary_cmd(update, context):
         if df.empty:
             update.effective_message.reply_text("No CSV loaded.")
             return
-        pcol = _auto_profit_col(df)
-        html = _summary_html(df, pcol) if pcol else "No profit column."
+        pcol = _auto_profit_col(df); tcol = _auto_time_col(df); scol = _auto_symbol_col(df)
+        args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
+        args = _parse_args(args_txt)
+        df2 = _apply_filters(df.copy(), args, tcol, scol)
+        if df2.empty:
+            update.effective_message.reply_text("No trades after applying filters.")
+            return
+        html = _summary_html(df2, pcol) if pcol else "No profit column."
         update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception as e:
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /summary: {e}")
 
+def graph_cmd(update, context):
+    try:
+        df = _read_csv_safely(TRADES_PATH)
+        if df.empty:
+            update.effective_message.reply_text("No CSV loaded.")
+            return
+        pcol = _auto_profit_col(df); tcol = _auto_time_col(df); scol = _auto_symbol_col(df)
+        if not pcol:
+            update.effective_message.reply_text("Couldn't detect profit column.")
+            return
+
+        args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
+        mode, args = _parse_graph_args(args_txt)
+
+        if "symbol" in args and scol in df.columns:
+            want = args["symbol"].strip().upper()
+            df = df[df[scol].astype(str).str.upper() == want]
+
+        r = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
+
+        if mode == "daily" and tcol:
+            tvals = _parse_maybe_datetime(df[tcol])
+            daily = r.groupby(tvals.dt.date).sum()
+            fig = plt.figure(figsize=(8,4))
+            plt.plot(daily.index.astype(str), daily.values)
+            plt.title("Daily PnL")
+            plt.xlabel("Date")
+            plt.ylabel("Daily PnL")
+            plt.xticks(rotation=45, ha="right")
+        elif mode == "dd":
+            eq = _equity_curve(r)
+            dd = _drawdown(eq)
+            fig = plt.figure(figsize=(8,4))
+            plt.plot(dd.index.values, dd.values)
+            plt.title("Drawdown")
+            plt.xlabel("Trade #")
+            plt.ylabel("Drawdown")
+        else:
+            eq = _equity_curve(r)
+            fig = plt.figure(figsize=(8,4))
+            plt.plot(eq.index.values, eq.values)
+            plt.title("Equity Curve")
+            plt.xlabel("Trade #")
+            plt.ylabel("Equity")
+
+        plt.tight_layout()
+        out = io.BytesIO()
+        fig.savefig(out, format="png")
+        plt.close(fig)
+        out.seek(0)
+        out.name = "graph.png"
+        caption = "Equity curve" if mode=="equity" else ("Daily PnL" if mode=="daily" else "Drawdown")
+        if "symbol" in args:
+            caption += f" — {args['symbol'].upper()}"
+        context.bot.send_photo(chat_id=update.effective_chat.id, photo=out, caption=caption)
+    except Exception as e:
+        traceback.print_exc()
+        update.effective_message.reply_text(f"❌ Error in /graph: {e}")
+
+# --------------- Callback buttons & file upload ---------------
+def on_help_buttons(update, context):
+    try:
+        q = update.callback_query
+        data = q.data or ""
+        q.answer()
+        if data == "HELP_SUMMARY7D":
+            context.args = ["timeframe=7d"]
+            summary_cmd(update, context)
+        elif data == "HELP_GRAPH_EQ":
+            context.args = []
+            graph_cmd(update, context)
+        elif data == "HELP_TRADES":
+            trades_cmd(update, context)
+        else:
+            q.edit_message_reply_markup(reply_markup=None)
+    except Exception as e:
+        traceback.print_exc()
+
+def on_document(update, context):
+    try:
+        doc = update.message.document
+        if not doc or not doc.file_name.lower().endswith(".csv"):
+            update.effective_message.reply_text("Please send a CSV file.")
+            return
+        f = doc.get_file()
+        content = f.download_as_bytearray()
+        with open(TRADES_PATH, "wb") as fh:
+            fh.write(content)
+        update.effective_message.reply_text("✅ CSV saved. Use /summary or /graph.")
+    except Exception as e:
+        traceback.print_exc()
+        update.effective_message.reply_text(f"❌ Failed to save CSV: {e}")
+
+# --------------- Register ---------------
 def register_handlers(dispatcher):
     dispatcher.add_handler(CommandHandler("start", start))
     dispatcher.add_handler(CommandHandler("help", help_cmd))
-    dispatcher.add_handler(CommandHandler("digest", digest_cmd))
-    dispatcher.add_handler(CommandHandler("digesttime", digesttime_cmd))
-    dispatcher.add_handler(CommandHandler("digeststatus", digeststatus_cmd))
-    dispatcher.add_handler(CommandHandler("summary", summary_cmd))
     dispatcher.add_handler(CommandHandler("columns", columns_cmd))
     dispatcher.add_handler(CommandHandler("status", status_cmd))
     dispatcher.add_handler(CommandHandler("trades", trades_cmd))
-    dispatcher.add_handler(CallbackQueryHandler(lambda u,c: None))  # keep inline callbacks safe
-    dispatcher.add_handler(MessageHandler(Filters.document, lambda u,c: None))
+    dispatcher.add_handler(CommandHandler("summary", summary_cmd))
+    dispatcher.add_handler(CommandHandler("graph", graph_cmd))
+    dispatcher.add_handler(CommandHandler("digest", digest_cmd))
+    dispatcher.add_handler(CommandHandler("digesttime", digesttime_cmd))
+    dispatcher.add_handler(CommandHandler("digeststatus", digeststatus_cmd))
+    dispatcher.add_handler(CallbackQueryHandler(on_help_buttons))
+    dispatcher.add_handler(MessageHandler(Filters.document, on_document))
