@@ -1,2 +1,1 @@
-timestamp,symbol,side,qty,price,pnl
-2025-08-09 09:00:00,BTCUSDT,BUY,0.01,60000,4.5
+Type,Symbol,Entry,PnL,Time

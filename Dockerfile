@@ -1,9 +1,14 @@
-# Dockerfile
+# Dockerfile - Railway
 FROM python:3.11-slim
 WORKDIR /app
+
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
 COPY . .
 ENV PYTHONUNBUFFERED=1
+
+# Railway sets $PORT; bind to 0.0.0.0:$PORT
 CMD ["sh", "-c", "gunicorn -w 1 -k gthread -b 0.0.0.0:${PORT} wsgi:app"]
