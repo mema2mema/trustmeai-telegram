@@ -25,6 +25,11 @@ print("[wsgi] Dispatcher ready with workers=2")
 # Flask app
 app = Flask(__name__)
 
+@app.route("/", methods=["GET"])
+def index():
+    return "<h1>TrustMe AI Telegram Bot is running ✅</h1><p>Use /health for status.</p>", 200
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return "ok", 200
