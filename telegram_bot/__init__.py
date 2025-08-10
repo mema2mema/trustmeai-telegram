@@ -1,4 +1,4 @@
-import os, io, time, threading, json
+import os, io, time, threading, json, re
 from datetime import datetime, timezone
 from flask import Flask, request, send_from_directory
 from telegram import Bot, Update
@@ -9,10 +9,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# Flask app for Gunicorn
 app = Flask(__name__)
 
-# Config
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 DATA_DIR = os.path.join(os.getcwd(), "data"); os.makedirs(DATA_DIR, exist_ok=True)
@@ -21,7 +19,6 @@ WALLET_PATH = os.path.join(DATA_DIR, "wallet.json")
 SUMMARY_HOUR_UTC = int(os.environ.get("SUMMARY_HOUR_UTC", "8"))
 SUMMARY_MINUTE = int(os.environ.get("SUMMARY_MINUTE", "0"))
 
-# Telegram
 bot = None
 dispatcher = None
 bg_started = False
@@ -34,6 +31,7 @@ def ensure_bot():
     if bot is None:
         b = Bot(token=TOKEN)
         d = Dispatcher(bot=b, update_queue=None, workers=4, use_context=True)
+        # commands
         d.add_handler(CommandHandler("start", start))
         d.add_handler(CommandHandler("help", help_cmd))
         d.add_handler(CommandHandler("summary", summary_cmd))
@@ -41,6 +39,12 @@ def ensure_bot():
         d.add_handler(CommandHandler("graph", graph_cmd))
         d.add_handler(CommandHandler("status", status_cmd))
         d.add_handler(CommandHandler("trades", trades_cmd))
+        # wallet
+        d.add_handler(CommandHandler("wallet", wallet_cmd))
+        d.add_handler(CommandHandler("deposit", deposit_cmd, pass_args=True))
+        d.add_handler(CommandHandler("withdraw", withdraw_cmd, pass_args=True))
+        d.add_handler(CommandHandler("setbalance", setbalance_cmd, pass_args=True))
+        # file upload
         d.add_handler(MessageHandler(Filters.document.mime_type("text/csv"), upload_csv))
         bot = b
         dispatcher = d
@@ -103,6 +107,55 @@ def write_wallet(w):
     try: json.dump(w, open(WALLET_PATH, "w", encoding="utf-8"))
     except Exception: pass
 
+def parse_amount(args):
+    if not args: return None
+    txt = " ".join(args).strip()
+    m = re.match(r"^\s*([+-]?\d+(\.\d+)?)\s*$", txt)
+    if not m: return None
+    return float(m.group(1))
+
+def wallet_cmd(update, context):
+    w = read_wallet()
+    update.message.reply_text(f"💼 Wallet: {w.get('balance',0):.2f} {w.get('currency','USDT')}")
+
+def deposit_cmd(update, context):
+    amt = parse_amount(context.args)
+    if amt is None or amt <= 0:
+        update.message.reply_text("Usage: /deposit <amount>  (amount must be positive)")
+        return
+    w = read_wallet()
+    w["balance"] = float(w.get("balance",0)) + amt
+    write_wallet(w)
+    update.message.reply_text(f"✅ Deposited {amt:.2f} {w.get('currency','USDT')}. New balance: {w['balance']:.2f}")
+
+def withdraw_cmd(update, context):
+    amt = parse_amount(context.args)
+    if amt is None or amt <= 0:
+        update.message.reply_text("Usage: /withdraw <amount>  (amount must be positive)")
+        return
+    w = read_wallet()
+    bal = float(w.get("balance",0))
+    if amt > bal:
+        update.message.reply_text(f"❌ Not enough balance. Current: {bal:.2f}")
+        return
+    w["balance"] = bal - amt
+    write_wallet(w)
+    update.message.reply_text(f"✅ Withdrew {amt:.2f} {w.get('currency','USDT')}. New balance: {w['balance']:.2f}")
+
+def setbalance_cmd(update, context):
+    # admin only (owner chat id)
+    if str(update.effective_user.id) != str(CHAT_ID):
+        update.message.reply_text("❌ Not authorized.")
+        return
+    amt = parse_amount(context.args)
+    if amt is None:
+        update.message.reply_text("Usage: /setbalance <amount>")
+        return
+    w = read_wallet()
+    w["balance"] = float(amt)
+    write_wallet(w)
+    update.message.reply_text(f"🔧 Balance set to {w['balance']:.2f} {w.get('currency','USDT')}")
+
 def watch_trades_loop():
     global last_rows
     while True:
@@ -120,19 +173,23 @@ def watch_trades_loop():
                     for _, r in new.iterrows():
                         pnl = float(pd.to_numeric(r.get("pnl", 0.0), errors="coerce") or 0.0)
                         bal += pnl
-                        msg = ("📣 *Live Trade Alert*\\n"
-                               f"• Symbol: *{r.get('symbol','?')}*\\n"
-                               f"• Side: *{r.get('side','?')}*\\n"
-                               f"• Qty: *{r.get('qty','?')}* @ *{r.get('price','?')}*\\n"
-                               f"• PnL: *{pnl:.2f}*\\n"
+                        msg = ("📣 *Live Trade Alert*\n"
+                               f"• Symbol: *{r.get('symbol','?')}*\n"
+                               f"• Side: *{r.get('side','?')}*\n"
+                               f"• Qty: *{r.get('qty','?')}* @ *{r.get('price','?')}*\n"
+                               f"• PnL: *{pnl:.2f}*\n"
                                f"• New Balance: *{bal:.2f} {wallet.get('currency','USDT')}*")
-                        try: bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
+                        try: bot.send_message(chat_id=CHAT_ID, text=text_escape(msg), parse_mode='Markdown')
                         except Exception as e: print("send_message failed:", e)
                     wallet["balance"] = bal; write_wallet(wallet)
                     last_rows = rows
             time.sleep(5)
         except Exception as e:
             print("watch_trades_loop error:", e); time.sleep(5)
+
+def text_escape(s):
+    # simple escape for Markdown special chars
+    return s.replace('_','\\_').replace('*','\\*').replace('[','\\[').replace('`','\\`')
 
 def daily_summary_loop():
     sent_day = None
@@ -144,9 +201,9 @@ def daily_summary_loop():
                     df, err = load_trades()
                     if not err:
                         eq = equity_curve(df["pnl"].values); mdd = max_drawdown(eq)
-                        text = ("🗓️ *Daily Summary*\\n"
-                                f"• Trades: *{len(df)}*\\n"
-                                f"• Net PnL: *{float(df['pnl'].sum()):.2f}*\\n"
+                        text = ("🗓️ *Daily Summary*\n"
+                                f"• Trades: *{len(df)}*\n"
+                                f"• Net PnL: *{float(df['pnl'].sum()):.2f}*\n"
                                 f"• Max DD: *{mdd:.2f}*")
                         try: bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
                         except Exception as e: print("daily send failed:", e)
@@ -163,10 +220,8 @@ def start_background_once():
         bg_started = True
 
 def _public_base():
-    # Always use https in messages
     return request.url_root.replace("http://", "https://").rstrip("/")
 
-# Commands
 def start(update, context):
     start_background_once()
     update.message.reply_text("✅ Live alerts ON. Use /help for commands.")
@@ -181,6 +236,9 @@ def help_cmd(update, context):
         "/graph – equity curve image\n"
         "/status – wallet + csv status (with link)\n"
         "/trades – download current trades.csv\n"
+        "/wallet – show wallet balance\n"
+        "/deposit <amount> – add funds\n"
+        "/withdraw <amount> – remove funds\n"
         "Send a CSV file to update trades."
     )
 
@@ -253,7 +311,6 @@ def upload_csv(update, context):
     except Exception as e:
         update.message.reply_text(f"❌ Upload failed: {e}")
 
-# Public download route
 @app.route("/files/trades.csv", methods=["GET"])
 def download_trades():
     path = find_trades_csv()
@@ -261,7 +318,6 @@ def download_trades():
         return "trades.csv not found", 404
     directory = os.path.dirname(path)
     filename = os.path.basename(path)
-    # Explicit CSV mimetype and no caching
     return send_from_directory(directory=directory,
                                path=filename,
                                as_attachment=True,
@@ -269,7 +325,6 @@ def download_trades():
                                download_name="trades.csv",
                                max_age=0)
 
-# Health & webhooks
 @app.route("/", methods=["GET"])
 def health():
     start_background_once()
