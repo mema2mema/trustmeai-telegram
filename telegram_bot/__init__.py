@@ -86,77 +86,27 @@ def _auto_symbol_col(df: pd.DataFrame):
             best, best_score = c, score
     return best
 
-def _max_drawdown(series: pd.Series):
-    roll_max = series.cummax()
-    dd = series - roll_max
-    return float(dd.min())
+def _equity_curve(pnl: pd.Series) -> pd.Series:
+    r = pd.to_numeric(pnl, errors="coerce").fillna(0.0).astype(float)
+    return r.cumsum()
 
-def _streaks(bools):
-    best_win, best_loss, cur, last = 0, 0, 0, None
-    for v in bools:
-        s = 1 if v else -1
-        if last is None or s == last:
-            cur += s
-        else:
-            cur = s
-        last = s
-        best_win = max(best_win, cur)
-        best_loss = min(best_loss, cur)
-    return best_win, -best_loss
+def _drawdown(equity: pd.Series) -> pd.Series:
+    peak = equity.cummax()
+    dd = equity - peak
+    return dd
 
-def _parse_args(args_text: str):
-    out = {}
+def _parse_graph_args(args_text: str):
+    mode = "equity"
+    args = {}
     if args_text:
-        for part in re.split(r"\s+", args_text.strip()):
-            if "=" in part:
-                k,v = part.split("=", 1)
-                out[k.strip().lower()] = v.strip()
-    return out
-
-def _apply_filters(df: pd.DataFrame, args: dict, tcol: str, scol: str):
-    if "symbol" in args and scol in df.columns:
-        want = args["symbol"].strip().upper()
-        df = df[df[scol].astype(str).str.upper() == want]
-    if "timeframe" in args and tcol in df.columns:
-        tf = args["timeframe"].strip().lower()
-        now = pd.Timestamp.now(tz=None)
-        delta = None
-        m = re.match(r"^(\\d+)\\s*([dhwmy])$", tf)
-        if m:
-            n = int(m.group(1)); unit = m.group(2)
-            delta = {"d":pd.Timedelta(days=n),
-                     "h":pd.Timedelta(hours=n),
-                     "w":pd.Timedelta(weeks=n),
-                     "m":pd.Timedelta(days=30*n),
-                     "y":pd.Timedelta(days=365*n)}.get(unit)
-        if delta is not None:
-            cutoff = now - delta
-            tvals = _parse_maybe_datetime(df[tcol])
-            df = df[tvals >= cutoff]
-    return df
-
-def _summary_html(df: pd.DataFrame, pcol: str):
-    r = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
-    total = int(r.shape[0])
-    pnl = float(r.sum())
-    win_rate = float((r > 0).mean()*100) if total else 0.0
-    avg = float(r.mean()) if total else 0.0
-    best = float(r.max()) if total else 0.0
-    worst = float(r.min()) if total else 0.0
-    wins, losses = _streaks(list(r > 0))
-    mdd = _max_drawdown(r.cumsum())
-
-    lines = [
-        "Summary",
-        f"Trades        : {total:>7d}",
-        f"PnL           : {pnl:>7.2f}",
-        f"Win rate      : {win_rate:>6.2f}%",
-        f"Avg/trade     : {avg:>7.2f}",
-        f"Best | Worst  : {best:>7.2f} | {worst:>7.2f}",
-        f"Win/Loss strk : {wins:>3d} / {losses:>3d}",
-        f"Max drawdown  : {mdd:>7.2f}",
-    ]
-    return "<b>📊 Performance</b>\n<pre>" + "\n".join(lines) + "</pre>"
+        parts = re.split(r"\s+", args_text.strip())
+        for p in parts:
+            if p.lower() in ("daily","dd"):
+                mode = p.lower()
+            elif "=" in p:
+                k,v = p.split("=",1)
+                args[k.strip().lower()] = v.strip()
+    return mode, args
 
 def start(update, context):
     html = (
@@ -169,15 +119,15 @@ def start(update, context):
 def help_cmd(update, context):
     html = (
         "<b>📘 Commands</b>\n"
-        "• <b>/start</b> — check bot\n"
-        "• <b>/help</b> — this menu\n"
-        "• <b>/summary</b> — auto-detect columns &amp; summarize\n"
+        "• <b>/summary</b> — detect & summarize\n"
         "    <code>/summary symbol=BTC timeframe=7d</code>\n"
-        "• <b>/graph</b> — equity curve image\n"
-        "• <b>/status</b> — current settings\n"
+        "• <b>/graph</b> — equity | daily | dd\n"
+        "    <code>/graph daily</code>\n"
+        "    <code>/graph dd</code>\n"
+        "    <code>/graph symbol=ETH</code>\n"
+        "• <b>/columns</b> — show detected columns\n"
         "• <b>/trades</b> — download current CSV\n"
-        "• <b>/columns</b> — show detected columns\n\n"
-        "<i>Tip: send new CSV to replace <code>trades.csv</code>.</i>"
+        "• <b>/status</b> — current settings"
     )
     update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
@@ -218,10 +168,7 @@ def trades_cmd(update, context):
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /trades: {e}")
 
-def log_cmd(update, context):
-    return columns_cmd(update, context)
-
-def summary_cmd(update, context):
+def graph_cmd(update, context):
     try:
         df = _read_csv_safely(TRADES_PATH)
         if df is None or df.empty:
@@ -231,42 +178,53 @@ def summary_cmd(update, context):
         if not pcol:
             update.effective_message.reply_text("Couldn't detect profit column.")
             return
-        args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
-        args = _parse_args(args_txt)
-        df2 = _apply_filters(df.copy(), args, tcol, scol)
-        if df2.empty:
-            update.effective_message.reply_text("No trades after applying filters.")
-            return
-        html = _summary_html(df2, pcol)
-        update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    except Exception as e:
-        traceback.print_exc()
-        update.effective_message.reply_text(f"❌ Error in /summary: {e}")
 
-def graph_cmd(update, context):
-    try:
-        df = _read_csv_safely(TRADES_PATH)
-        if df is None or df.empty:
-            update.effective_message.reply_text("No CSV loaded.")
-            return
-        pcol = _auto_profit_col(df)
-        if not pcol:
-            update.effective_message.reply_text("Couldn't detect profit column.")
-            return
+        args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
+        mode, args = _parse_graph_args(args_txt)
+
+        # Symbol filter (optional)
+        if "symbol" in args and scol in df.columns:
+            want = args["symbol"].strip().upper()
+            df = df[df[scol].astype(str).str.upper() == want]
+
         r = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
-        eq = r.cumsum()
-        fig = plt.figure(figsize=(8,4))
-        plt.plot(eq.index.values, eq.values)
-        plt.title("Equity Curve")
-        plt.xlabel("Trade #")
-        plt.ylabel("Equity")
+
+        if mode == "daily" and tcol:
+            tvals = _parse_maybe_datetime(df[tcol])
+            daily = r.groupby(tvals.dt.date).sum()
+            fig = plt.figure(figsize=(8,4))
+            plt.plot(daily.index.astype(str), daily.values)
+            plt.title("Daily PnL")
+            plt.xlabel("Date")
+            plt.ylabel("Daily PnL")
+            plt.xticks(rotation=45, ha="right")
+        elif mode == "dd":
+            eq = _equity_curve(r)
+            dd = _drawdown(eq)
+            fig = plt.figure(figsize=(8,4))
+            plt.plot(dd.index.values, dd.values)
+            plt.title("Drawdown")
+            plt.xlabel("Trade #")
+            plt.ylabel("Drawdown")
+        else:
+            eq = _equity_curve(r)
+            fig = plt.figure(figsize=(8,4))
+            plt.plot(eq.index.values, eq.values)
+            plt.title("Equity Curve")
+            plt.xlabel("Trade #")
+            plt.ylabel("Equity")
+
         plt.tight_layout()
         out = io.BytesIO()
         fig.savefig(out, format="png")
         plt.close(fig)
         out.seek(0)
-        out.name = "equity.png"
-        context.bot.send_photo(chat_id=update.effective_chat.id, photo=out, caption="Equity curve")
+        out.name = "graph.png"
+        caption = "Equity curve" if mode=="equity" else ("Daily PnL" if mode=="daily" else "Drawdown")
+        if "symbol" in args:
+            caption += f" — {args['symbol'].upper()}"
+        update.effective_message.chat.send_action(action="upload_photo")
+        context.bot.send_photo(chat_id=update.effective_chat.id, photo=out, caption=caption)
     except Exception as e:
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /graph: {e}")
@@ -292,7 +250,5 @@ def register_handlers(dispatcher):
     dispatcher.add_handler(CommandHandler("columns", columns_cmd))
     dispatcher.add_handler(CommandHandler("status", status_cmd))
     dispatcher.add_handler(CommandHandler("trades", trades_cmd))
-    dispatcher.add_handler(CommandHandler("log", log_cmd))
-    dispatcher.add_handler(CommandHandler("summary", summary_cmd))
-    dispatcher.add_handler(CommandHandler("graph", graph_cmd))
     dispatcher.add_handler(MessageHandler(Filters.document, on_document))
+    dispatcher.add_handler(CommandHandler("graph", graph_cmd))
