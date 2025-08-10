@@ -25,16 +25,13 @@ def start_scheduler():
     scheduler.start()
 
 def _schedule_digest():
-    # Remove existing
     try:
         for job in scheduler.get_jobs():
             scheduler.remove_job(job.id)
     except Exception:
         pass
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not token:
-        return
-    if not os.path.exists(DIGEST_FILE):
+    if not token or not os.path.exists(DIGEST_FILE):
         return
     chat_id = open(DIGEST_FILE).read().strip()
     if not chat_id:
@@ -123,17 +120,14 @@ def _auto_time_col(df: pd.DataFrame):
     return None
 
 def _auto_symbol_col(df: pd.DataFrame):
-    # Exact matches first
     for name in SYMBOL_CANDIDATES:
         for c in df.columns:
             if str(c).strip().lower() == name:
                 return c
-    # Fuzzy regex match
     pattern = re.compile(r"(symbol|pair|market|ticker|instrument|asset|coin)", re.IGNORECASE)
     for c in df.columns:
         if pattern.search(str(c)):
             return c
-    # Heuristic: most repeated short-ish string column
     candidates = []
     for c in df.columns:
         s = df[c]
@@ -251,7 +245,94 @@ def _parse_graph_args(args_text: str):
                 args[k.strip().lower()] = v.strip()
     return mode, args
 
-# ---------------- UI ----------------
+# ---------------- New commands: perfs & heatmap ----------------
+def _perfs_table(df: pd.DataFrame, pcol: str, scol: str, top: int = 15) -> str:
+    g = df.groupby(scol)[pcol]
+    total = g.count()
+    pnl = g.sum()
+    avg = g.mean()
+    win = df.assign(win=lambda x: (pd.to_numeric(x[pcol], errors="coerce") > 0).astype(int)).groupby(scol)['win'].mean()*100.0
+    out = pd.DataFrame({"Trades": total, "PnL": pnl, "Win%": win, "Avg": avg}).fillna(0.0)
+    out = out.sort_values("PnL", ascending=False).head(top)
+    # Build monospaced table
+    lines = ["Symbol Performance"]
+    lines.append(f"{'Symbol':<10} {'Trades':>6} {'PnL':>10} {'Win%':>7} {'Avg':>9}")
+    for idx, r in out.iterrows():
+        lines.append(f"{str(idx)[:10]:<10} {int(r['Trades']):>6d} {float(r['PnL']):>10.2f} {float(r['Win%']):>6.2f}% {float(r['Avg']):>9.2f}")
+    return "<b>📈 Per-Symbol</b>\n<pre>" + "\n".join(lines) + "</pre>"
+
+def perfs_cmd(update, context):
+    try:
+        df = _read_csv_safely(TRADES_PATH)
+        if df.empty:
+            update.effective_message.reply_text("No CSV loaded.")
+            return
+        pcol = _auto_profit_col(df); tcol = _auto_time_col(df); scol = _auto_symbol_col(df)
+        if not (pcol and scol):
+            update.effective_message.reply_text("Need profit and symbol columns.")
+            return
+        args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
+        args = _parse_args(args_txt)
+        df2 = _apply_filters(df.copy(), args, tcol, scol)
+        if df2.empty:
+            update.effective_message.reply_text("No trades after applying filters.")
+            return
+        html = _perfs_table(df2, pcol, scol, top=int(args.get("top", 15)))
+        update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        traceback.print_exc()
+        update.effective_message.reply_text(f"❌ Error in /perfs: {e}")
+
+def heatmap_cmd(update, context):
+    try:
+        df = _read_csv_safely(TRADES_PATH)
+        if df.empty:
+            update.effective_message.reply_text("No CSV loaded.")
+            return
+        pcol = _auto_profit_col(df); tcol = _auto_time_col(df); scol = _auto_symbol_col(df)
+        if not (pcol and tcol):
+            update.effective_message.reply_text("Need profit and time columns.")
+            return
+        args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
+        args = _parse_args(args_txt)
+        df2 = _apply_filters(df.copy(), args, tcol, scol)
+
+        # Build daily pnl and pivot by date x symbol (or weekday if arg 'weekday=1')
+        tvals = _parse_maybe_datetime(df2[tcol])
+        df2 = df2.assign(__date=tvals.dt.date)
+        if 'weekday' in args and args['weekday'] in ('1','true','yes'):
+            df2 = df2.assign(__weekday=tvals.dt.day_name())
+            pivot = df2.pivot_table(index="__weekday", columns=scol if scol in df2.columns else "__date",
+                                    values=pcol, aggfunc="sum", fill_value=0.0)
+            ylabel = "Weekday"
+            xlabel = "Symbol" if scol in df2.columns else "Date"
+        else:
+            pivot = df2.pivot_table(index="__date", columns=scol if scol in df2.columns else "__date",
+                                    values=pcol, aggfunc="sum", fill_value=0.0)
+            ylabel = "Date"
+            xlabel = "Symbol" if scol in df2.columns else "Date"
+
+        if pivot.empty:
+            update.effective_message.reply_text("No data for heatmap.")
+            return
+
+        fig = plt.figure(figsize=(8,5))
+        plt.imshow(pivot.values, aspect='auto')
+        plt.title("PnL Heatmap")
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.tight_layout()
+        out = io.BytesIO()
+        fig.savefig(out, format="png")
+        plt.close(fig)
+        out.seek(0)
+        out.name = "heatmap.png"
+        context.bot.send_photo(chat_id=update.effective_chat.id, photo=out, caption="PnL Heatmap")
+    except Exception as e:
+        traceback.print_exc()
+        update.effective_message.reply_text(f"❌ Error in /heatmap: {e}")
+
+# ---------------- Existing UI ----------------
 def _help_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Summary 7d", callback_data="HELP_SUMMARY7D")],
@@ -264,10 +345,12 @@ def _help_html():
         "<b>📘 Commands</b>\n"
         "• <b>/summary</b> — detect & summarize\n"
         "    <code>/summary symbol=BTC timeframe=7d</code>\n"
+        "• <b>/perfs</b> — per-symbol table (add <code>top=10</code>)\n"
         "• <b>/graph</b> — equity | daily | dd\n"
         "    <code>/graph daily</code>\n"
         "    <code>/graph dd</code>\n"
         "    <code>/graph symbol=ETH</code>\n"
+        "• <b>/heatmap</b> — PnL heatmap (add <code>weekday=1</code>)\n"
         "• <b>/digest on|off</b> — toggle daily summary\n"
         "• <b>/digesttime HH:MM</b> — set daily time (UTC)\n"
         "• <b>/digeststatus</b> — show current state\n"
@@ -277,7 +360,6 @@ def _help_html():
         "<i>Tip: send new CSV to replace <code>trades.csv</code>.</i>"
     )
 
-# ---------------- Commands ----------------
 def start(update, context):
     banner = "<b>✅ Bot is online</b>\nUse <b>/help</b> for commands.\n\n<i>Send a CSV anytime to update trades.</i>"
     update.effective_message.reply_text(banner, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
@@ -286,6 +368,7 @@ def start(update, context):
 def help_cmd(update, context):
     update.effective_message.reply_text(_help_html(), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=_help_keyboard())
 
+# digest suite (reuse from 3.9.4)
 def digeststatus_cmd(update, context):
     on = os.path.exists(DIGEST_FILE) and (open(DIGEST_FILE).read().strip() != "")
     t = "09:00"
@@ -337,6 +420,7 @@ def digesttime_cmd(update, context):
     except Exception:
         update.message.reply_text("❌ Invalid time format. Use HH:MM (24h UTC).")
 
+# columns/trades/summary/graph from 3.9.4
 def status_cmd(update, context):
     update.effective_message.reply_text(f"TRADES_PATH: {TRADES_PATH}")
 
@@ -374,20 +458,40 @@ def trades_cmd(update, context):
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /trades: {e}")
 
+def _summary_html_public(df):
+    pcol = _auto_profit_col(df)
+    return _summary_html(df, pcol) if pcol else "No profit column."
+
+def _parse_graph_args(args_text: str):
+    mode = "equity"
+    args = {}
+    if args_text:
+        parts = re.split(r"\\s+", args_text.strip())
+        for p in parts:
+            if p.lower() in ("daily","dd"):
+                mode = p.lower()
+            elif "=" in p:
+                k,v = p.split("=",1)
+                args[k.strip().lower()] = v.strip()
+    return mode, args
+
+def _apply_filters_public(df, args):
+    pcol = _auto_profit_col(df); tcol = _auto_time_col(df); scol = _auto_symbol_col(df)
+    return _apply_filters(df, args, tcol, scol), pcol, tcol, scol
+
 def summary_cmd(update, context):
     try:
         df = _read_csv_safely(TRADES_PATH)
         if df.empty:
             update.effective_message.reply_text("No CSV loaded.")
             return
-        pcol = _auto_profit_col(df); tcol = _auto_time_col(df); scol = _auto_symbol_col(df)
         args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
         args = _parse_args(args_txt)
-        df2 = _apply_filters(df.copy(), args, tcol, scol)
+        df2, pcol, tcol, scol = _apply_filters_public(df.copy(), args)
         if df2.empty:
             update.effective_message.reply_text("No trades after applying filters.")
             return
-        html = _summary_html(df2, pcol) if pcol else "No profit column."
+        html = _summary_html_public(df2)
         update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception as e:
         traceback.print_exc()
@@ -399,22 +503,22 @@ def graph_cmd(update, context):
         if df.empty:
             update.effective_message.reply_text("No CSV loaded.")
             return
-        pcol = _auto_profit_col(df); tcol = _auto_time_col(df); scol = _auto_symbol_col(df)
+        args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
+        args = _parse_args(args_txt)
+        df2, pcol, tcol, scol = _apply_filters_public(df.copy(), args)
         if not pcol:
             update.effective_message.reply_text("Couldn't detect profit column.")
             return
+        r = pd.to_numeric(df2[pcol], errors="coerce").fillna(0.0).astype(float)
 
-        args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
-        mode, args = _parse_graph_args(args_txt)
-
-        if "symbol" in args and scol in df.columns:
-            want = args["symbol"].strip().upper()
-            df = df[df[scol].astype(str).str.upper() == want]
-
-        r = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
+        mode = "equity"
+        if args_txt:
+            for token in re.split(r"\\s+", args_txt.strip()):
+                if token.lower() in ("daily","dd"):
+                    mode = token.lower()
 
         if mode == "daily" and tcol:
-            tvals = _parse_maybe_datetime(df[tcol])
+            tvals = _parse_maybe_datetime(df2[tcol])
             daily = r.groupby(tvals.dt.date).sum()
             fig = plt.figure(figsize=(8,4))
             plt.plot(daily.index.astype(str), daily.values)
@@ -452,7 +556,7 @@ def graph_cmd(update, context):
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /graph: {e}")
 
-# --------------- Callback buttons & file upload ---------------
+# callbacks & upload
 def on_help_buttons(update, context):
     try:
         q = update.callback_query
@@ -486,15 +590,16 @@ def on_document(update, context):
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Failed to save CSV: {e}")
 
-# --------------- Register ---------------
 def register_handlers(dispatcher):
     dispatcher.add_handler(CommandHandler("start", start))
     dispatcher.add_handler(CommandHandler("help", help_cmd))
-    dispatcher.add_handler(CommandHandler("columns", columns_cmd))
-    dispatcher.add_handler(CommandHandler("status", status_cmd))
-    dispatcher.add_handler(CommandHandler("trades", trades_cmd))
     dispatcher.add_handler(CommandHandler("summary", summary_cmd))
+    dispatcher.add_handler(CommandHandler("perfs", perfs_cmd))
     dispatcher.add_handler(CommandHandler("graph", graph_cmd))
+    dispatcher.add_handler(CommandHandler("heatmap", heatmap_cmd))
+    dispatcher.add_handler(CommandHandler("columns", columns_cmd))
+    dispatcher.add_handler(CommandHandler("trades", trades_cmd))
+    dispatcher.add_handler(CommandHandler("status", status_cmd))
     dispatcher.add_handler(CommandHandler("digest", digest_cmd))
     dispatcher.add_handler(CommandHandler("digesttime", digesttime_cmd))
     dispatcher.add_handler(CommandHandler("digeststatus", digeststatus_cmd))
