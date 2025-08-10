@@ -9,7 +9,6 @@ from telegram_bot import register_handlers, start_scheduler
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 APP_TOKEN_IN_PATH = os.environ.get("APP_TOKEN_IN_PATH", "0") == "1"
 
-# Initialize scheduler once per worker (idempotent)
 try:
     start_scheduler()
 except Exception as e:
