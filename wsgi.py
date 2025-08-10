@@ -13,7 +13,7 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN env var not set")
 
-APP_TOKEN_IN_PATH = True  # protect /webhook/<token> route
+APP_TOKEN_IN_PATH = os.environ.get('APP_TOKEN_IN_PATH', '1') == '1'  # protect /webhook/<token> route
 
 # Bot & dispatcher (PTB v13 style)
 request = Request(con_pool_size=8)
@@ -28,6 +28,20 @@ app = Flask(__name__)
 @app.route("/", methods=["GET"])
 def index():
     return "<h1>TrustMe AI Telegram Bot is running ✅</h1><p>Use /health for status.</p>", 200
+
+
+
+@app.route("/send_test", methods=["GET"])
+def send_test():
+    chat_id = request.args.get("chat_id")
+    text = request.args.get("text", "Test message from TrustMe AI bot")
+    if not chat_id:
+        return "chat_id required", 400
+    try:
+        bot.send_message(chat_id=chat_id, text=text)
+        return f"Sent to {chat_id}", 200
+    except Exception as e:
+        return str(e), 500
 
 
 @app.route("/health", methods=["GET"])
@@ -49,7 +63,9 @@ def webhook():
 
 def _process_update():
     try:
-        update = Update.de_json(request.get_json(force=True), bot)
+        payload = request.get_json(force=True)
+    print('[webhook] Incoming update:', payload)
+    update = Update.de_json(payload, bot)
         dispatcher.process_update(update)
     except Exception as e:
         # Always respond 200 to keep webhook active; include error info
