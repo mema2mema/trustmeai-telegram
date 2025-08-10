@@ -2,10 +2,10 @@
 import io, os, traceback, re, math
 import pandas as pd
 import numpy as np
-from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram.ext import CommandHandler, MessageHandler, Filters, CallbackQueryHandler
 from telegram import ParseMode, InlineKeyboardMarkup, InlineKeyboardButton, Bot
+from pytz import utc as TZ_UTC
 
 import matplotlib
 matplotlib.use("Agg")
@@ -15,8 +15,8 @@ TRADES_PATH = os.environ.get("TRADES_PATH", "trades.csv")
 DIGEST_FILE = "digest_chat.txt"
 DIGEST_TIME_FILE = "digest_time.txt"
 
-# ---------------- Scheduler ----------------
-scheduler = BackgroundScheduler(daemon=True)
+# ---------------- Scheduler (pytz UTC) ----------------
+scheduler = BackgroundScheduler(daemon=True, timezone=TZ_UTC)
 
 def start_scheduler():
     """Idempotent start; safe to call multiple times."""
@@ -40,7 +40,7 @@ def _schedule_digest():
     chat_id = open(DIGEST_FILE).read().strip()
     if not chat_id:
         return
-    # parse time
+    # parse time (UTC)
     hour, minute = 9, 0
     if os.path.exists(DIGEST_TIME_FILE):
         try:
@@ -51,7 +51,9 @@ def _schedule_digest():
         except Exception:
             pass
     bot = Bot(token=token)
-    scheduler.add_job(lambda: _send_digest(bot, chat_id), 'cron', hour=hour, minute=minute, id='daily_digest', replace_existing=True)
+    scheduler.add_job(lambda: _send_digest(bot, chat_id), 'cron',
+                      hour=hour, minute=minute, id='daily_digest',
+                      replace_existing=True, timezone=TZ_UTC)
 
 def _send_digest(bot: Bot, chat_id: str):
     try:
@@ -136,7 +138,7 @@ def _auto_symbol_col(df: pd.DataFrame):
             best, best_score = c, score
     return best
 
-# --------------- Stats helpers ---------------
+# --------------- Stats & formatting ---------------
 def _equity_curve(pnl: pd.Series) -> pd.Series:
     r = pd.to_numeric(pnl, errors="coerce").fillna(0.0).astype(float)
     return r.cumsum()
@@ -164,7 +166,6 @@ def _streaks(bools):
         best_loss = min(best_loss, cur)
     return best_win, -best_loss
 
-# --------------- Formatting ---------------
 def _summary_html(df: pd.DataFrame, pcol: str):
     r = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
     total = int(r.shape[0])
@@ -197,7 +198,7 @@ def _build_summary_digest():
     block = _summary_html(df, pcol).replace("📊 Performance", "📊 Daily Digest")
     return block
 
-# --------------- Parsers ---------------
+# --------------- Parsers & filters ---------------
 def _parse_args(args_text: str):
     out = {}
     if args_text:
@@ -233,7 +234,7 @@ def _parse_graph_args(args_text: str):
     mode = "equity"
     args = {}
     if args_text:
-        parts = re.split(r"\\s+", args_text.strip())
+        parts = re.split(r"\s+", args_text.strip())
         for p in parts:
             if p.lower() in ("daily","dd"):
                 mode = p.lower()
@@ -242,7 +243,7 @@ def _parse_graph_args(args_text: str):
                 args[k.strip().lower()] = v.strip()
     return mode, args
 
-# --------------- UI helpers ---------------
+# --------------- UI ---------------
 def _help_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Summary 7d", callback_data="HELP_SUMMARY7D")],
@@ -271,7 +272,6 @@ def _help_html():
 def start(update, context):
     banner = "<b>✅ Bot is online</b>\nUse <b>/help</b> for commands.\n\n<i>Send a CSV anytime to update trades.</i>"
     update.effective_message.reply_text(banner, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    # Also show full help with buttons immediately
     update.effective_message.reply_text(_help_html(), parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=_help_keyboard())
 
 def help_cmd(update, context):
