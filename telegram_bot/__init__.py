@@ -12,10 +12,11 @@ import matplotlib.pyplot as plt
 app = Flask(__name__)
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")
+CHAT_ID = os.environ.get("CHAT_ID", "")  # owner/admin
 DATA_DIR = os.path.join(os.getcwd(), "data"); os.makedirs(DATA_DIR, exist_ok=True)
 TRADES_PATHS = [os.path.join(DATA_DIR, "trades.csv"), os.path.join(os.getcwd(), "trades.csv")]
 WALLET_PATH = os.path.join(DATA_DIR, "wallet.json")
+TRANSFERS_PATH = os.path.join(DATA_DIR, "transfers.json")
 SUMMARY_HOUR_UTC = int(os.environ.get("SUMMARY_HOUR_UTC", "8"))
 SUMMARY_MINUTE = int(os.environ.get("SUMMARY_MINUTE", "0"))
 
@@ -44,6 +45,8 @@ def ensure_bot():
         d.add_handler(CommandHandler("deposit", deposit_cmd, pass_args=True))
         d.add_handler(CommandHandler("withdraw", withdraw_cmd, pass_args=True))
         d.add_handler(CommandHandler("setbalance", setbalance_cmd, pass_args=True))
+        d.add_handler(CommandHandler("transfer", transfer_cmd, pass_args=True))
+        d.add_handler(CommandHandler("transfers", transfers_cmd))
         # file upload
         d.add_handler(MessageHandler(Filters.document.mime_type("text/csv"), upload_csv))
         bot = b
@@ -107,21 +110,36 @@ def write_wallet(w):
     try: json.dump(w, open(WALLET_PATH, "w", encoding="utf-8"))
     except Exception: pass
 
-def parse_amount(args):
-    if not args: return None
-    txt = " ".join(args).strip()
-    m = re.match(r"^\s*([+-]?\d+(\.\d+)?)\s*$", txt)
-    if not m: return None
-    return float(m.group(1))
+def read_transfers():
+    if os.path.exists(TRANSFERS_PATH):
+        try: return json.load(open(TRANSFERS_PATH, "r", encoding="utf-8"))
+        except Exception: pass
+    return []
+
+def write_transfers(rows):
+    try: json.dump(rows, open(TRANSFERS_PATH, "w", encoding="utf-8"))
+    except Exception: pass
+
+def parse_amount(s):
+    try: return float(s)
+    except: return None
+
+def parse_transfer_args(args):
+    # /transfer <amount> <to_chat_id>
+    if not args or len(args) < 2: return None, None
+    amt = parse_amount(args[0])
+    to_id = args[1]
+    if amt is None or amt <= 0: return None, None
+    return amt, to_id
 
 def wallet_cmd(update, context):
     w = read_wallet()
     update.message.reply_text(f"💼 Wallet: {w.get('balance',0):.2f} {w.get('currency','USDT')}")
 
 def deposit_cmd(update, context):
-    amt = parse_amount(context.args)
+    amt = parse_amount(" ".join(context.args).strip())
     if amt is None or amt <= 0:
-        update.message.reply_text("Usage: /deposit <amount>  (amount must be positive)")
+        update.message.reply_text("Usage: /deposit <amount>")
         return
     w = read_wallet()
     w["balance"] = float(w.get("balance",0)) + amt
@@ -129,9 +147,9 @@ def deposit_cmd(update, context):
     update.message.reply_text(f"✅ Deposited {amt:.2f} {w.get('currency','USDT')}. New balance: {w['balance']:.2f}")
 
 def withdraw_cmd(update, context):
-    amt = parse_amount(context.args)
+    amt = parse_amount(" ".join(context.args).strip())
     if amt is None or amt <= 0:
-        update.message.reply_text("Usage: /withdraw <amount>  (amount must be positive)")
+        update.message.reply_text("Usage: /withdraw <amount>")
         return
     w = read_wallet()
     bal = float(w.get("balance",0))
@@ -143,11 +161,10 @@ def withdraw_cmd(update, context):
     update.message.reply_text(f"✅ Withdrew {amt:.2f} {w.get('currency','USDT')}. New balance: {w['balance']:.2f}")
 
 def setbalance_cmd(update, context):
-    # admin only (owner chat id)
     if str(update.effective_user.id) != str(CHAT_ID):
         update.message.reply_text("❌ Not authorized.")
         return
-    amt = parse_amount(context.args)
+    amt = parse_amount(" ".join(context.args).strip())
     if amt is None:
         update.message.reply_text("Usage: /setbalance <amount>")
         return
@@ -155,6 +172,42 @@ def setbalance_cmd(update, context):
     w["balance"] = float(amt)
     write_wallet(w)
     update.message.reply_text(f"🔧 Balance set to {w['balance']:.2f} {w.get('currency','USDT')}")
+
+def transfer_cmd(update, context):
+    amt, to_id = parse_transfer_args(context.args)
+    if amt is None:
+        update.message.reply_text("Usage: /transfer <amount> <to_chat_id>")
+        return
+    w = read_wallet()
+    bal = float(w.get("balance",0))
+    if amt > bal:
+        update.message.reply_text(f"❌ Not enough balance. Current: {bal:.2f}")
+        return
+    # Deduct
+    w["balance"] = bal - amt; write_wallet(w)
+    # Log
+    rows = read_transfers()
+    rows.append({"ts": datetime.utcnow().isoformat(), "from": str(update.effective_user.id), "to": str(to_id), "amount": amt})
+    write_transfers(rows)
+    # Notify receiver if same bot/chat reachable
+    try:
+        msg = f"💸 You received {amt:.2f} USDT from {update.effective_user.id}"
+        Bot(token=TOKEN).send_message(chat_id=to_id, text=msg)
+    except Exception as e:
+        # It's fine if we can't notify (user hasn't started bot, etc.)
+        pass
+    update.message.reply_text(f"✅ Sent {amt:.2f} USDT to {to_id}. New balance: {w['balance']:.2f}")
+
+def transfers_cmd(update, context):
+    rows = read_transfers()
+    if not rows:
+        update.message.reply_text("No transfers yet.")
+        return
+    # show last 10
+    out = ["📜 Last transfers:"]
+    for r in rows[-10:]:
+        out.append(f"{r['ts']}  {r['from']} ➜ {r['to']}  {r['amount']:.2f}")
+    update.message.reply_text("\n".join(out))
 
 def watch_trades_loop():
     global last_rows
@@ -178,18 +231,14 @@ def watch_trades_loop():
                                f"• Side: *{r.get('side','?')}*\n"
                                f"• Qty: *{r.get('qty','?')}* @ *{r.get('price','?')}*\n"
                                f"• PnL: *{pnl:.2f}*\n"
-                               f"• New Balance: *{bal:.2f} {wallet.get('currency','USDT')}*")
-                        try: bot.send_message(chat_id=CHAT_ID, text=text_escape(msg), parse_mode='Markdown')
+                               f"• New Balance: *{bal:.2f}* USDT")
+                        try: Bot(token=TOKEN).send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
                         except Exception as e: print("send_message failed:", e)
                     wallet["balance"] = bal; write_wallet(wallet)
                     last_rows = rows
             time.sleep(5)
         except Exception as e:
             print("watch_trades_loop error:", e); time.sleep(5)
-
-def text_escape(s):
-    # simple escape for Markdown special chars
-    return s.replace('_','\\_').replace('*','\\*').replace('[','\\[').replace('`','\\`')
 
 def daily_summary_loop():
     sent_day = None
@@ -205,7 +254,7 @@ def daily_summary_loop():
                                 f"• Trades: *{len(df)}*\n"
                                 f"• Net PnL: *{float(df['pnl'].sum()):.2f}*\n"
                                 f"• Max DD: *{mdd:.2f}*")
-                        try: bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
+                        try: Bot(token=TOKEN).send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
                         except Exception as e: print("daily send failed:", e)
                     sent_day = now.date()
             time.sleep(60)
@@ -239,6 +288,8 @@ def help_cmd(update, context):
         "/wallet – show wallet balance\n"
         "/deposit <amount> – add funds\n"
         "/withdraw <amount> – remove funds\n"
+        "/transfer <amount> <to_chat_id> – send funds\n"
+        "/transfers – show recent transfers\n"
         "Send a CSV file to update trades."
     )
 
