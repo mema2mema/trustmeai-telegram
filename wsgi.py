@@ -9,7 +9,7 @@ from telegram.utils.request import Request
 from telegram_bot import register_handlers
 
 # Environment
-TOKEN = os.environ.get("TOKEN")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN env var not set")
 

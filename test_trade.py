@@ -2,7 +2,7 @@
 import os
 from telegram import Bot
 
-TOKEN = os.environ.get("TOKEN")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")  # your chat id
 if not TOKEN or not CHAT_ID:
     raise SystemExit("Set TOKEN and CHAT_ID env vars")
