@@ -9,6 +9,12 @@ from telegram_bot import register_handlers, start_scheduler
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 APP_TOKEN_IN_PATH = os.environ.get("APP_TOKEN_IN_PATH", "0") == "1"
 
+# start scheduler (idempotent)
+try:
+    start_scheduler()
+except Exception as e:
+    print("Scheduler start warning:", e)
+
 app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
@@ -43,9 +49,3 @@ def webhook_tokened(path_token):
         if not TELEGRAM_BOT_TOKEN or path_token != TELEGRAM_BOT_TOKEN:
             return "forbidden", 403
     return _handle_webhook()
-
-# Start scheduler on load
-start_scheduler()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
