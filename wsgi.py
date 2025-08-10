@@ -18,8 +18,9 @@ APP_TOKEN_IN_PATH = True  # protect /webhook/<token> route
 # Bot & dispatcher (PTB v13 style)
 request = Request(con_pool_size=8)
 bot = Bot(token=TOKEN, request=request)
-dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
+dispatcher = Dispatcher(bot, None, workers=2, use_context=True)
 register_handlers(dispatcher)
+print("[wsgi] Dispatcher ready with workers=2")
 
 # Flask app
 app = Flask(__name__)
