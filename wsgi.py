@@ -1,56 +1,34 @@
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from telegram import Bot, Update
 from telegram.ext import Dispatcher
 from telegram.utils.request import Request
-import telegram_bot as tb  # import module, not symbol
+from telegram_bot import register_handlers
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 APP_TOKEN_IN_PATH = os.environ.get("APP_TOKEN_IN_PATH", "0") == "1"
 
 app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def index():
-    if not TOKEN:
+    if not TELEGRAM_BOT_TOKEN:
         return "<h1>TrustMe AI Bot ⚠️</h1><p>Set TELEGRAM_BOT_TOKEN in Railway Variables.</p>", 200
-    return "<h1>TrustMe AI Telegram Bot is running ✅</h1>", 200
-
-@app.route("/health", methods=["GET"])
-def health():
-    return "ok", 200
-
-@app.route("/health/handlers", methods=["GET"])
-def health_handlers():
-    return jsonify({"register_handlers": hasattr(tb, "register_handlers")}), 200
-
-bot = None
-dispatcher = None
-if TOKEN:
-    req = Request(con_pool_size=8)
-    bot = Bot(token=TOKEN, request=req)
-    dispatcher = Dispatcher(bot, None, workers=2, use_context=True)
-    if hasattr(tb, "register_handlers"):
-        tb.register_handlers(dispatcher)
-        print("[wsgi] register_handlers wired")
-    else:
-        print("[wsgi] ERROR: telegram_bot.register_handlers missing")
-    print("[wsgi] Dispatcher ready with workers=2")
-else:
-    print("[wsgi] WARNING: TELEGRAM_BOT_TOKEN missing. Bot not initialized.]")
+    return "<h1>TrustMe AI Bot ✅</h1><p>Webhook endpoint is /webhook{opt}</p>".format(
+        opt="/<TOKEN>" if APP_TOKEN_IN_PATH else ""
+    ), 200
 
 def _handle_webhook():
-    if not TOKEN:
-        return jsonify({"ok": False, "error": "TELEGRAM_BOT_TOKEN not set"}), 503
-    try:
-        payload = request.get_json(force=True)
-        print("[webhook] Incoming update:", payload)
-        update = Update.de_json(payload, bot)
-        dispatcher.process_update(update)
-    except Exception as e:
-        print("[webhook] Error:", repr(e))
-        return jsonify({"ok": False, "error": str(e)}), 200
-    return jsonify({"ok": True}), 200
+    body = request.get_json(force=True, silent=True)
+    if not body:
+        return "no json", 400
+    req = Request(con_pool_size=8)
+    bot = Bot(token=TELEGRAM_BOT_TOKEN, request=req)
+    dispatcher = Dispatcher(bot=bot, update_queue=None, workers=0, use_context=True)
+    register_handlers(dispatcher)
+    update = Update.de_json(body, bot)
+    dispatcher.process_update(update)
+    return "OK", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -61,7 +39,7 @@ def webhook():
 @app.route("/webhook/<path_token>", methods=["POST"])
 def webhook_tokened(path_token):
     if APP_TOKEN_IN_PATH:
-        if not TOKEN or path_token != TOKEN:
+        if not TELEGRAM_BOT_TOKEN or path_token != TELEGRAM_BOT_TOKEN:
             return "forbidden", 403
     return _handle_webhook()
 

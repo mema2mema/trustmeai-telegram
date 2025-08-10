@@ -1,6 +1,8 @@
-\
-import io, os, traceback, re
+
+import io, os, traceback, re, math
+from datetime import datetime, timedelta
 import pandas as pd
+import numpy as np
 from telegram.ext import CommandHandler, MessageHandler, Filters
 from telegram import ParseMode
 
@@ -9,245 +11,332 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 TRADES_PATH = os.environ.get("TRADES_PATH", "trades.csv")
-SAMPLE_TRADES = "sample_trades.csv"
 
 PROFIT_CANDIDATES = [
     "pnl","profit","pl","p&l","net_pnl","netpnl","net-profit","netprofit",
     "return","returns","roi","netp&l","gross_pnl","grosspnl","net"
 ]
 TIME_CANDIDATES = [
-    "time","timestamp","date","datetime","open_time","close_time","trade_time"
+    "time","timestamp","date","datetime","open_time","close_time",
+    "entry_time","exit_time","created_at","closed_at","ts","opened_at"
+]
+SYMBOL_CANDIDATES = [
+    "symbol","pair","market","ticker","instrument","asset","coin"
 ]
 
-def _norm(name: str):
-    return re.sub(r"[^a-z0-9]", "", name.lower())
-
-def detect_columns(df):
-    norm = {c: _norm(c) for c in df.columns}
-    inv = {v: k for k,v in norm.items()}
-    profit_col = None
-    for cand in PROFIT_CANDIDATES:
-        key = _norm(cand)
-        if key in inv:
-            profit_col = inv[key]; break
-    if profit_col is None:
-        for c, n in norm.items():
-            if any(tok in n for tok in ["pnl","profit","pl","ret","roi"]):
-                profit_col = c; break
-    time_col = None
-    for cand in TIME_CANDIDATES:
-        key = _norm(cand)
-        if key in inv:
-            time_col = inv[key]; break
-    if time_col is None:
-        for c, n in norm.items():
-            if any(tok in n for tok in ["time","date"]):
-                time_col = c; break
-    return profit_col, time_col
-
-def _ensure_sample_if_missing():
-    if not os.path.exists(TRADES_PATH):
-        if os.path.exists(SAMPLE_TRADES):
-            return SAMPLE_TRADES
-    return TRADES_PATH if os.path.exists(TRADES_PATH) else None
-
-def _load_df_safely():
-    path = _ensure_sample_if_missing()
-    if not path:
-        return None, None
+def _read_csv_safely(path: str) -> pd.DataFrame:
+    # Try default
     try:
         df = pd.read_csv(path)
-        for c in df.columns:
-            if df[c].dtype == object:
-                try:
-                    df[c] = df[c].str.replace(",", ".").astype(float)
-                except Exception:
-                    pass
-        pcol, tcol = detect_columns(df)
-        if tcol:
-            try:
-                df[tcol] = pd.to_datetime(df[tcol])
-            except Exception:
-                pass
-        df.attrs["profit_col"] = pcol
-        df.attrs["time_col"] = tcol
-        df.attrs["path"] = path
-        return df, path
+        return df
     except Exception:
-        traceback.print_exc()
-        return None, path
+        pass
+    # Try ; separator
+    try:
+        df = pd.read_csv(path, sep=";")
+        return df
+    except Exception:
+        pass
+    # Try latin-1
+    try:
+        df = pd.read_csv(path, encoding="latin-1")
+        return df
+    except Exception as e:
+        raise e
 
-def _equity_curve_png_bytes(df):
-    pcol = df.attrs.get("profit_col")
-    if not pcol or pcol not in df.columns:
-        return None
-    series = pd.to_numeric(df[pcol], errors="coerce").fillna(0)
-    if series.empty:
-        return None
-    equity = series.cumsum()
-    xcol = df.attrs.get("time_col")
-    x = df[xcol] if xcol and xcol in df.columns else range(len(equity))
-    fig, ax = plt.subplots(figsize=(8,4))
-    ax.plot(x, equity)
-    ax.set_title("Equity Curve")
-    ax.set_xlabel("Time" if xcol else "Trade #")
-    ax.set_ylabel("Cumulative Profit")
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
+def _auto_profit_col(df: pd.DataFrame):
+    cols = [c for c in df.columns]
+    # name priority
+    for name in PROFIT_CANDIDATES:
+        for c in cols:
+            if str(c).strip().lower() == name:
+                return c
+    # numeric fallback
+    numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
+    if numeric_cols:
+        # pick the most variable numeric column
+        var = [(c, float(pd.Series(df[c]).fillna(0).std())) for c in numeric_cols]
+        var.sort(key=lambda x: x[1], reverse=True)
+        return var[0][0]
+    return None
+
+def _parse_maybe_datetime(series: pd.Series) -> pd.Series:
+    s = series.copy()
+    # numeric epoch
+    if pd.api.types.is_numeric_dtype(s):
+        median = float(pd.Series(s).dropna().median()) if s.notna().any() else 0.0
+        unit = "ms" if median > 1e12 else "s"
+        try:
+            return pd.to_datetime(s, unit=unit, errors="coerce")
+        except Exception:
+            return pd.to_datetime(s, errors="coerce")
+    # string date
+    return pd.to_datetime(s, errors="coerce", utc=False)
+
+def _auto_time_col(df: pd.DataFrame):
+    cols = [c for c in df.columns]
+    # named preference
+    for name in TIME_CANDIDATES:
+        for c in cols:
+            if str(c).strip().lower() == name:
+                parsed = _parse_maybe_datetime(df[c])
+                if parsed.notna().sum() >= max(3, int(0.5*len(df))):
+                    return c
+    # try each column; pick with most parsed
+    best = None
+    best_ok = -1
+    for c in cols:
+        parsed = _parse_maybe_datetime(df[c])
+        ok = parsed.notna().sum()
+        if ok > best_ok:
+            best_ok = ok
+            best = c
+    if best_ok >= max(3, int(0.3*len(df))):
+        return best
+    return None
+
+def _auto_symbol_col(df: pd.DataFrame):
+    cols = [c for c in df.columns]
+    for name in SYMBOL_CANDIDATES:
+        for c in cols:
+            if str(c).strip().lower() == name:
+                return c
+    # Heuristic: short strings with few unique values
+    str_cols = [c for c in cols if df[c].dtype == object]
+    best = None
+    best_score = -1
+    for c in str_cols:
+        uniq = df[c].dropna().unique()
+        score = 1000 - len(uniq)  # fewer uniques preferred
+        if score > best_score:
+            best = c
+            best_score = score
+    return best
+
+def _ensure_equity(df: pd.DataFrame, pcol: str):
+    returns = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
+    equity = returns.cumsum()
+    return equity
+
+def _max_drawdown(series: pd.Series):
+    roll_max = series.cummax()
+    dd = series - roll_max
+    mdd = dd.min()
+    return float(mdd)
+
+def _streaks(x: pd.Series):
+    best_win, best_loss = 0, 0
+    cur = 0
+    last = None
+    for v in x:
+        s = 1 if v else -1
+        if last is None or (s == 1 and last == 1) or (s == -1 and last == -1):
+            cur += s
+        else:
+            cur = s
+        last = s
+        best_win = max(best_win, cur)
+        best_loss = min(best_loss, cur)
+    return best_win, -best_loss
+
+def _parse_args(args_text: str):
+    """
+    Parse strings like:
+      symbol=BTC timeframe=7d
+      timeframe=30d
+    Returns dict.
+    """
+    out = {}
+    if not args_text:
+        return out
+    for part in re.split(r"\\s+", args_text.strip()):
+        if "=" in part:
+            k,v = part.split("=", 1)
+            out[k.strip().lower()] = v.strip()
+    return out
+
+def _apply_filters(df: pd.DataFrame, args: dict, tcol: str, scol: str):
+    # Symbol filter
+    if "symbol" in args and scol in df.columns:
+        want = args["symbol"].strip().upper()
+        df = df[df[scol].astype(str).str.upper() == want]
+
+    # Timeframe filter: Nd, Nw, Nm, Ny, Nh
+    if "timeframe" in args and tcol in df.columns:
+        tf = args["timeframe"].strip().lower()
+        now = pd.Timestamp.now(tz=None)
+        delta = None
+        m = re.match(r"^(\\d+)\\s*([dhwmy])$", tf)
+        if m:
+            n = int(m.group(1))
+            unit = m.group(2)
+            if unit == "d":
+                delta = pd.Timedelta(days=n)
+            elif unit == "h":
+                delta = pd.Timedelta(hours=n)
+            elif unit == "w":
+                delta = pd.Timedelta(weeks=n)
+            elif unit == "m":
+                delta = pd.Timedelta(days=30*n)
+            elif unit == "y":
+                delta = pd.Timedelta(days=365*n)
+        if delta is not None:
+            cutoff = now - delta
+            tvals = _parse_maybe_datetime(df[tcol])
+            df = df[tvals >= cutoff]
+    return df
+
+def _summary_text(df: pd.DataFrame, pcol: str):
+    r = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
+    total_trades = int(r.shape[0])
+    total_profit = float(r.sum())
+    win_rate = float((r > 0).mean() * 100.0) if total_trades else 0.0
+    avg_profit = float(r.mean()) if total_trades else 0.0
+    best_trade = float(r.max()) if total_trades else 0.0
+    worst_trade = float(r.min()) if total_trades else 0.0
+
+    wins, losses = _streaks(list(r > 0))
+    equity = r.cumsum()
+    mdd = _max_drawdown(equity)
+
+    lines = [
+        "📊 Summary",
+        f"• Trades: {total_trades}",
+        f"• PnL: {total_profit:.2f}",
+        f"• Win rate: {win_rate:.2f}%",
+        f"• Avg/trade: {avg_profit:.2f}",
+        f"• Best: {best_trade:.2f} | Worst: {worst_trade:.2f}",
+        f"• Max win streak: {wins} | Max loss streak: {losses}",
+        f"• Max drawdown: {mdd:.2f}",
+    ]
+    return "\\n".join(lines)
 
 def start(update, context):
-    update.effective_message.reply_text("✅ Bot is online. Use /help for commands.")
+    update.effective_message.reply_text(
+        "TrustMe AI Bot is live ✅\\n"
+        "Send a CSV or use /help"
+    )
 
 def help_cmd(update, context):
-    text = (
-        "Commands:\n"
-        "/start – check bot\n"
-        "/help – this menu\n"
-        "/summary – auto-detect columns & summarize\n"
-        "/graph – equity curve image\n"
-        "/status – latest trades + CSV\n"
-        "/trades – download current CSV\n"
-        "/columns – show detected columns\n"
-        "Send a CSV to update trades.\n"
+    update.effective_message.reply_text(
+        "Commands:\\n"
+        "/status — show settings\\n"
+        "/columns — detect time & profit columns\\n"
+        "/trades — download current CSV\\n"
+        "/summary [symbol=BTC] [timeframe=7d]\\n"
+        "/graph — equity curve"
     )
-    update.effective_message.reply_text(text)
+
+def status_cmd(update, context):
+    update.effective_message.reply_text(
+        f"TRADES_PATH: {TRADES_PATH}"
+    )
 
 def columns_cmd(update, context):
     try:
-        df, path = _load_df_safely()
+        df = _read_csv_safely(TRADES_PATH)
         if df is None or df.empty:
-            update.effective_message.reply_text("No CSV loaded. Send a CSV first.", parse_mode=None)
+            update.effective_message.reply_text("No CSV loaded.")
             return
-        pcol = df.attrs.get("profit_col")
-        tcol = df.attrs.get("time_col")
-        cols = list(map(str, df.columns.tolist()))
-        total = len(cols)
-        preview = ", ".join(cols[:40]) + (" ..." if total > 40 else "")
-        msg = (
-            f"CSV: {path}\n"
-            f"Detected profit: {pcol}\n"
-            f"Detected time: {tcol}\n"
-            f"Columns ({total}): {preview}\n"
-            "(Full list attached if too long)"
+        pcol = _auto_profit_col(df)
+        tcol = _auto_time_col(df)
+        scol = _auto_symbol_col(df)
+        cols = ", ".join(map(str, df.columns.tolist()))
+        update.effective_message.reply_text(
+            f"Detected profit: {pcol}\\nDetected time: {tcol}\\nDetected symbol: {scol}\\n\\nColumns: {cols}"
         )
-        update.effective_message.reply_text(msg, parse_mode=None, disable_web_page_preview=True)
-        if total > 40:
-            body = (
-                f"CSV: {path}\n"
-                f"Detected profit: {pcol}\n"
-                f"Detected time: {tcol}\n\n"
-                f"All columns ({total}):\n" + "\n".join(cols)
-            )
-            bio = io.BytesIO(body.encode("utf-8"))
-            bio.name = "columns.txt"
-            context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=bio,
-                filename="columns.txt",
-                caption="Full columns list"
-            )
     except Exception as e:
-        update.effective_message.reply_text(f"Error in /columns: {e}", parse_mode=None)
-
-def status_cmd(update, context):
-    df, path = _load_df_safely()
-    if df is None or df.empty:
-        update.effective_message.reply_text("🟡 No trades yet. Upload a CSV or use /trades to get the sample file.")
-        return
-    buf = io.StringIO()
-    df.tail(20).to_csv(buf, index=False)
-    buf.seek(0)
-    context.bot.send_document(
-        chat_id=update.effective_chat.id,
-        document=io.BytesIO(buf.getvalue().encode("utf-8")),
-        filename="status.csv",
-        caption="📊 Status: latest rows attached."
-    )
+        traceback.print_exc()
+        update.effective_message.reply_text(f"❌ Error in /columns: {e}")
 
 def trades_cmd(update, context):
-    df, path = _load_df_safely()
-    if df is None:
-        update.effective_message.reply_text("🟡 No trades file found yet. Send a CSV to set trades.")
-        return
-    b = io.BytesIO()
-    df.to_csv(b, index=False)
-    b.seek(0)
-    context.bot.send_document(
-        chat_id=update.effective_chat.id,
-        document=b,
-        filename="trades.csv",
-        caption="📈 Current trades.csv"
-    )
+    try:
+        if not os.path.exists(TRADES_PATH):
+            update.effective_message.reply_text("No trades file yet.")
+            return
+        with open(TRADES_PATH, "rb") as f:
+            bio = io.BytesIO(f.read())
+        bio.name = os.path.basename(TRADES_PATH)
+        context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=bio,
+            filename=bio.name
+        )
+    except Exception as e:
+        traceback.print_exc()
+        update.effective_message.reply_text(f"❌ Error in /trades: {e}")
 
 def log_cmd(update, context):
-    return trades_cmd(update, context)
+    return columns_cmd(update, context)
 
 def summary_cmd(update, context):
     try:
-        df, path = _load_df_safely()
+        df = _read_csv_safely(TRADES_PATH)
         if df is None or df.empty:
-            update.effective_message.reply_text("🟡 No data loaded. Send a CSV first.")
+            update.effective_message.reply_text("No CSV loaded.")
             return
-        pcol = df.attrs.get("profit_col")
+        pcol = _auto_profit_col(df)
+        tcol = _auto_time_col(df)
+        scol = _auto_symbol_col(df)
         if not pcol:
-            update.effective_message.reply_text("🟡 Could not detect profit column. Use names like 'pnl', 'profit', 'pl', 'return'.")
+            update.effective_message.reply_text("Couldn't detect profit column.")
             return
-        series = pd.to_numeric(df[pcol], errors="coerce").fillna(0)
-        total = len(series)
-        wins = int((series > 0).sum())
-        losses = total - wins
-        win_rate = (wins/total*100.0) if total else 0.0
-        gross = float(series.sum())
-        avg = float(series.mean())
-        equity = series.cumsum()
-        peak = equity.cummax()
-        drawdown = equity - peak
-        mdd = float(drawdown.min())
-        text = (
-            "📜 Summary\n"
-            f"• Source: `{path}`\n"
-            f"• Profit column: `{pcol}`\n"
-            f"• Trades: {total}\n"
-            f"• Wins/Losses: {wins}/{losses}\n"
-            f"• Win Rate: {win_rate:.2f}%\n"
-            f"• Gross: {gross:.4f}\n"
-            f"• Avg/trade: {avg:.4f}\n"
-            f"• Max Drawdown: {mdd:.4f}\n"
-        )
-        update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
+        args = _parse_args(args_txt)
+
+        # Filters
+        df_filtered = df.copy()
+        df_filtered = _apply_filters(df_filtered, args, tcol, scol)
+
+        if df_filtered.empty:
+            update.effective_message.reply_text("No trades after applying filters.")
+            return
+
+        text = _summary_text(df_filtered, pcol)
+        update.effective_message.reply_text(text)
     except Exception as e:
         traceback.print_exc()
-        update.effective_message.reply_text(f"❌ /summary failed: {e}")
+        update.effective_message.reply_text(f"❌ Error in /summary: {e}")
 
 def graph_cmd(update, context):
     try:
-        df, path = _load_df_safely()
+        df = _read_csv_safely(TRADES_PATH)
         if df is None or df.empty:
-            update.effective_message.reply_text("🟡 No data loaded. Send a CSV first.")
+            update.effective_message.reply_text("No CSV loaded.")
             return
-        img = _equity_curve_png_bytes(df)
-        if not img:
-            update.effective_message.reply_text("🟡 Couldn't build graph. Make sure your CSV has a profit column like pnl/profit/pl/return.")
+        pcol = _auto_profit_col(df)
+        if not pcol:
+            update.effective_message.reply_text("Couldn't detect profit column.")
             return
-        context.bot.send_photo(chat_id=update.effective_chat.id, photo=img, caption="📈 Equity Curve")
+        r = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
+        eq = r.cumsum()
+        fig = plt.figure(figsize=(8,4))
+        plt.plot(eq.index.values, eq.values)
+        plt.title("Equity Curve")
+        plt.xlabel("Trade #")
+        plt.ylabel("Equity")
+        plt.tight_layout()
+        out = io.BytesIO()
+        fig.savefig(out, format="png")
+        plt.close(fig)
+        out.seek(0)
+        out.name = "equity.png"
+        context.bot.send_photo(chat_id=update.effective_chat.id, photo=out, caption="Equity curve")
     except Exception as e:
         traceback.print_exc()
-        update.effective_message.reply_text(f"❌ /graph failed: {e}")
+        update.effective_message.reply_text(f"❌ Error in /graph: {e}")
 
 def on_document(update, context):
     try:
         doc = update.message.document
         if not doc or not doc.file_name.lower().endswith(".csv"):
-            return update.effective_message.reply_text("Please upload a .csv file.")
-        file = context.bot.getFile(doc.file_id)
-        b = file.download_as_bytearray()
-        with open(TRADES_PATH, "wb") as f:
-            f.write(b)
-        update.effective_message.reply_text(f"✅ Saved `{doc.file_name}` as `{TRADES_PATH}`.", parse_mode=ParseMode.MARKDOWN)
+            update.effective_message.reply_text("Please send a CSV file.")
+            return
+        f = doc.get_file()
+        content = f.download_as_bytearray()
+        with open(TRADES_PATH, "wb") as fh:
+            fh.write(content)
+        update.effective_message.reply_text(f"✅ Saved CSV to {TRADES_PATH}. Use /summary or /graph.")
     except Exception as e:
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Failed to save CSV: {e}")
@@ -262,5 +351,3 @@ def register_handlers(dispatcher):
     dispatcher.add_handler(CommandHandler("summary", summary_cmd))
     dispatcher.add_handler(CommandHandler("graph", graph_cmd))
     dispatcher.add_handler(MessageHandler(Filters.document, on_document))
-
-__all__ = ["register_handlers"]
