@@ -4,7 +4,7 @@ from flask import Flask, request
 from telegram import Bot, Update
 from telegram.ext import Dispatcher
 from telegram.utils.request import Request
-from telegram_bot import register_handlers
+from telegram_bot import register_handlers, start_scheduler
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 APP_TOKEN_IN_PATH = os.environ.get("APP_TOKEN_IN_PATH", "0") == "1"
@@ -45,4 +45,5 @@ def webhook_tokened(path_token):
     return _handle_webhook()
 
 if __name__ == "__main__":
+    start_scheduler()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
