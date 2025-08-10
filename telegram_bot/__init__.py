@@ -2,8 +2,8 @@
 import io, os, traceback, re, math
 import pandas as pd
 import numpy as np
-from telegram.ext import CommandHandler, MessageHandler, Filters
-from telegram import ParseMode
+from telegram.ext import CommandHandler, MessageHandler, Filters, CallbackQueryHandler
+from telegram import ParseMode, InlineKeyboardMarkup, InlineKeyboardButton
 
 import matplotlib
 matplotlib.use("Agg")
@@ -23,13 +23,14 @@ SYMBOL_CANDIDATES = [
     "symbol","pair","market","ticker","instrument","asset","coin"
 ]
 
+# ---------- CSV helpers ----------
 def _read_csv_safely(path: str) -> pd.DataFrame:
     for args in ({}, {"sep":";"}, {"encoding":"latin-1"}):
         try:
             return pd.read_csv(path, **args)
         except Exception:
             continue
-    raise RuntimeError("Failed to read CSV")
+    return pd.DataFrame()
 
 def _auto_profit_col(df: pd.DataFrame):
     for name in PROFIT_CANDIDATES:
@@ -86,6 +87,7 @@ def _auto_symbol_col(df: pd.DataFrame):
             best, best_score = c, score
     return best
 
+# ---------- Stats helpers ----------
 def _equity_curve(pnl: pd.Series) -> pd.Series:
     r = pd.to_numeric(pnl, errors="coerce").fillna(0.0).astype(float)
     return r.cumsum()
@@ -95,19 +97,79 @@ def _drawdown(equity: pd.Series) -> pd.Series:
     dd = equity - peak
     return dd
 
-def _parse_graph_args(args_text: str):
-    mode = "equity"
-    args = {}
-    if args_text:
-        parts = re.split(r"\s+", args_text.strip())
-        for p in parts:
-            if p.lower() in ("daily","dd"):
-                mode = p.lower()
-            elif "=" in p:
-                k,v = p.split("=",1)
-                args[k.strip().lower()] = v.strip()
-    return mode, args
+def _max_drawdown(series: pd.Series):
+    roll_max = series.cummax()
+    dd = series - roll_max
+    return float(dd.min())
 
+def _streaks(bools):
+    best_win, best_loss, cur, last = 0, 0, 0, None
+    for v in bools:
+        s = 1 if v else -1
+        if last is None or s == last:
+            cur += s
+        else:
+            cur = s
+        last = s
+        best_win = max(best_win, cur)
+        best_loss = min(best_loss, cur)
+    return best_win, -best_loss
+
+def _parse_args(args_text: str):
+    out = {}
+    if args_text:
+        for part in re.split(r"\s+", args_text.strip()):
+            if "=" in part:
+                k,v = part.split("=", 1)
+                out[k.strip().lower()] = v.strip()
+    return out
+
+def _apply_filters(df: pd.DataFrame, args: dict, tcol: str, scol: str):
+    if "symbol" in args and scol in df.columns:
+        want = args["symbol"].strip().upper()
+        df = df[df[scol].astype(str).str.upper() == want]
+    if "timeframe" in args and tcol in df.columns:
+        tf = args["timeframe"].strip().lower()
+        now = pd.Timestamp.now(tz=None)
+        delta = None
+        m = re.match(r"^(\d+)\s*([dhwmy])$", tf)
+        if m:
+            n = int(m.group(1)); unit = m.group(2)
+            if unit == "d": delta = pd.Timedelta(days=n)
+            elif unit == "h": delta = pd.Timedelta(hours=n)
+            elif unit == "w": delta = pd.Timedelta(weeks=n)
+            elif unit == "m": delta = pd.Timedelta(days=30*n)
+            elif unit == "y": delta = pd.Timedelta(days=365*n)
+        if delta is not None:
+            cutoff = now - delta
+            tvals = _parse_maybe_datetime(df[tcol])
+            df = df[tvals >= cutoff]
+    return df
+
+def _summary_html(df: pd.DataFrame, pcol: str):
+    r = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
+    total = int(r.shape[0])
+    pnl = float(r.sum())
+    win_rate = float((r > 0).mean()*100) if total else 0.0
+    avg = float(r.mean()) if total else 0.0
+    best = float(r.max()) if total else 0.0
+    worst = float(r.min()) if total else 0.0
+    wins, losses = _streaks(list(r > 0))
+    mdd = _max_drawdown(r.cumsum())
+
+    lines = [
+        "Summary",
+        f"Trades        : {total:>7d}",
+        f"PnL           : {pnl:>7.2f}",
+        f"Win rate      : {win_rate:>6.2f}%",
+        f"Avg/trade     : {avg:>7.2f}",
+        f"Best | Worst  : {best:>7.2f} | {worst:>7.2f}",
+        f"Win/Loss strk : {wins:>3d} / {losses:>3d}",
+        f"Max drawdown  : {mdd:>7.2f}",
+    ]
+    return "<b>📊 Performance</b>\n<pre>" + "\n".join(lines) + "</pre>"
+
+# ---------- Bot commands ----------
 def start(update, context):
     html = (
         "<b>✅ Bot is online</b>\n"
@@ -115,6 +177,13 @@ def start(update, context):
         "<i>Send a CSV anytime to update trades.</i>"
     )
     update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+def _help_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Summary 7d", callback_data="HELP_SUMMARY7D")],
+        [InlineKeyboardButton("📈 Graph Equity", callback_data="HELP_GRAPH_EQ")],
+        [InlineKeyboardButton("📥 Download CSV", callback_data="HELP_TRADES")],
+    ])
 
 def help_cmd(update, context):
     html = (
@@ -127,9 +196,12 @@ def help_cmd(update, context):
         "    <code>/graph symbol=ETH</code>\n"
         "• <b>/columns</b> — show detected columns\n"
         "• <b>/trades</b> — download current CSV\n"
-        "• <b>/status</b> — current settings"
+        "• <b>/status</b> — current settings\n\n"
+        "<i>Tip: send new CSV to replace <code>trades.csv</code>.</i>"
     )
-    update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    update.effective_message.reply_text(
+        html, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=_help_keyboard()
+    )
 
 def status_cmd(update, context):
     update.effective_message.reply_text(f"TRADES_PATH: {TRADES_PATH}")
@@ -167,6 +239,42 @@ def trades_cmd(update, context):
     except Exception as e:
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /trades: {e}")
+
+def summary_cmd(update, context):
+    try:
+        df = _read_csv_safely(TRADES_PATH)
+        if df is None or df.empty:
+            update.effective_message.reply_text("No CSV loaded.")
+            return
+        pcol = _auto_profit_col(df); tcol = _auto_time_col(df); scol = _auto_symbol_col(df)
+        if not pcol:
+            update.effective_message.reply_text("Couldn't detect profit column.")
+            return
+        args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
+        args = _parse_args(args_txt)
+        df2 = _apply_filters(df.copy(), args, tcol, scol)
+        if df2.empty:
+            update.effective_message.reply_text("No trades after applying filters.")
+            return
+        html = _summary_html(df2, pcol)
+        update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        traceback.print_exc()
+        update.effective_message.reply_text(f"❌ Error in /summary: {e}")
+
+# ---------- Graphs ----------
+def _parse_graph_args(args_text: str):
+    mode = "equity"
+    args = {}
+    if args_text:
+        parts = re.split(r"\s+", args_text.strip())
+        for p in parts:
+            if p.lower() in ("daily","dd"):
+                mode = p.lower()
+            elif "=" in p:
+                k,v = p.split("=",1)
+                args[k.strip().lower()] = v.strip()
+    return mode, args
 
 def graph_cmd(update, context):
     try:
@@ -223,12 +331,32 @@ def graph_cmd(update, context):
         caption = "Equity curve" if mode=="equity" else ("Daily PnL" if mode=="daily" else "Drawdown")
         if "symbol" in args:
             caption += f" — {args['symbol'].upper()}"
-        update.effective_message.chat.send_action(action="upload_photo")
         context.bot.send_photo(chat_id=update.effective_chat.id, photo=out, caption=caption)
     except Exception as e:
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /graph: {e}")
 
+# ---------- Inline button actions ----------
+def on_help_buttons(update, context):
+    try:
+        q = update.callback_query
+        data = q.data or ""
+        q.answer()
+        if data == "HELP_SUMMARY7D":
+            # run /summary timeframe=7d
+            context.args = ["timeframe=7d"]
+            summary_cmd(update, context)
+        elif data == "HELP_GRAPH_EQ":
+            context.args = []
+            graph_cmd(update, context)
+        elif data == "HELP_TRADES":
+            trades_cmd(update, context)
+        else:
+            q.edit_message_reply_markup(reply_markup=None)
+    except Exception as e:
+        traceback.print_exc()
+
+# ---------- File upload ----------
 def on_document(update, context):
     try:
         doc = update.message.document
@@ -244,11 +372,14 @@ def on_document(update, context):
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Failed to save CSV: {e}")
 
+# ---------- Register ----------
 def register_handlers(dispatcher):
     dispatcher.add_handler(CommandHandler("start", start))
     dispatcher.add_handler(CommandHandler("help", help_cmd))
     dispatcher.add_handler(CommandHandler("columns", columns_cmd))
     dispatcher.add_handler(CommandHandler("status", status_cmd))
     dispatcher.add_handler(CommandHandler("trades", trades_cmd))
-    dispatcher.add_handler(MessageHandler(Filters.document, on_document))
+    dispatcher.add_handler(CommandHandler("summary", summary_cmd))
     dispatcher.add_handler(CommandHandler("graph", graph_cmd))
+    dispatcher.add_handler(CallbackQueryHandler(on_help_buttons))
+    dispatcher.add_handler(MessageHandler(Filters.document, on_document))
