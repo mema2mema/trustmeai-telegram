@@ -1,3 +1,4 @@
+
 import io, os, traceback, re, math
 import pandas as pd
 import numpy as np
@@ -120,7 +121,7 @@ def _apply_filters(df: pd.DataFrame, args: dict, tcol: str, scol: str):
         tf = args["timeframe"].strip().lower()
         now = pd.Timestamp.now(tz=None)
         delta = None
-        m = re.match(r"^(\d+)\s*([dhwmy])$", tf)
+        m = re.match(r"^(\\d+)\\s*([dhwmy])$", tf)
         if m:
             n = int(m.group(1)); unit = m.group(2)
             delta = {"d":pd.Timedelta(days=n),
@@ -155,7 +156,7 @@ def _summary_html(df: pd.DataFrame, pcol: str):
         f"Win/Loss strk : {wins:>3d} / {losses:>3d}",
         f"Max drawdown  : {mdd:>7.2f}",
     ]
-    return "<b>📊 Performance</b>\\n<pre>" + "\\n".join(lines) + "</pre>"
+    return "<b>📊 Performance</b>\n<pre>" + "\n".join(lines) + "</pre>"
 
 def start(update, context):
     html = (
@@ -170,8 +171,8 @@ def help_cmd(update, context):
         "<b>📘 Commands</b>\n"
         "• <b>/start</b> — check bot\n"
         "• <b>/help</b> — this menu\n"
-        "• <b>/summary</b> — auto-detect columns & summarize<br>"
-        "&nbsp;&nbsp;&nbsp;&nbsp;<code>/summary symbol=BTC timeframe=7d</code>\n"
+        "• <b>/summary</b> — auto-detect columns &amp; summarize\n"
+        "    <code>/summary symbol=BTC timeframe=7d</code>\n"
         "• <b>/graph</b> — equity curve image\n"
         "• <b>/status</b> — current settings\n"
         "• <b>/trades</b> — download current CSV\n"
