@@ -9,13 +9,6 @@ from telegram_bot import register_handlers, start_scheduler
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 APP_TOKEN_IN_PATH = os.environ.get("APP_TOKEN_IN_PATH", "0") == "1"
 
-# Start scheduler at import (Gunicorn) — it's idempotent inside telegram_bot.start_scheduler
-try:
-    start_scheduler()
-except Exception as _e:
-    # Avoid hard crash if scheduler cannot start at import time
-    print("Scheduler init warning:", _e)
-
 app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
@@ -50,3 +43,9 @@ def webhook_tokened(path_token):
         if not TELEGRAM_BOT_TOKEN or path_token != TELEGRAM_BOT_TOKEN:
             return "forbidden", 403
     return _handle_webhook()
+
+# Start scheduler on load
+start_scheduler()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
