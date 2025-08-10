@@ -1,4 +1,3 @@
-
 import io, os, traceback, re, math
 import pandas as pd
 import numpy as np
@@ -121,7 +120,7 @@ def _apply_filters(df: pd.DataFrame, args: dict, tcol: str, scol: str):
         tf = args["timeframe"].strip().lower()
         now = pd.Timestamp.now(tz=None)
         delta = None
-        m = re.match(r"^(\\d+)\\s*([dhwmy])$", tf)
+        m = re.match(r"^(\d+)\s*([dhwmy])$", tf)
         if m:
             n = int(m.group(1)); unit = m.group(2)
             delta = {"d":pd.Timedelta(days=n),
@@ -135,7 +134,7 @@ def _apply_filters(df: pd.DataFrame, args: dict, tcol: str, scol: str):
             df = df[tvals >= cutoff]
     return df
 
-def _summary_text(df: pd.DataFrame, pcol: str):
+def _summary_html(df: pd.DataFrame, pcol: str):
     r = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
     total = int(r.shape[0])
     pnl = float(r.sum())
@@ -156,21 +155,30 @@ def _summary_text(df: pd.DataFrame, pcol: str):
         f"Win/Loss strk : {wins:>3d} / {losses:>3d}",
         f"Max drawdown  : {mdd:>7.2f}",
     ]
-    body = "<b>📊 Performance</b>\\n<pre>" + "\\n".join(lines) + "</pre>"
-    return body
+    return "<b>📊 Performance</b>\\n<pre>" + "\\n".join(lines) + "</pre>"
 
 def start(update, context):
-    update.effective_message.reply_text("TrustMe AI Bot is live ✅\\nSend a CSV or use /help")
+    html = (
+        "<b>✅ Bot is online</b>\n"
+        "Use <b>/help</b> for commands.\n\n"
+        "<i>Send a CSV anytime to update trades.</i>"
+    )
+    update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 def help_cmd(update, context):
-    update.effective_message.reply_text(
-        "Commands:\\n"
-        "/status — show settings\\n"
-        "/columns — detect time & profit columns\\n"
-        "/trades — download current CSV\\n"
-        "/summary [symbol=BTC] [timeframe=7d]\\n"
-        "/graph — equity curve"
+    html = (
+        "<b>📘 Commands</b>\n"
+        "• <b>/start</b> — check bot\n"
+        "• <b>/help</b> — this menu\n"
+        "• <b>/summary</b> — auto-detect columns & summarize<br>"
+        "&nbsp;&nbsp;&nbsp;&nbsp;<code>/summary symbol=BTC timeframe=7d</code>\n"
+        "• <b>/graph</b> — equity curve image\n"
+        "• <b>/status</b> — current settings\n"
+        "• <b>/trades</b> — download current CSV\n"
+        "• <b>/columns</b> — show detected columns\n\n"
+        "<i>Tip: send new CSV to replace <code>trades.csv</code>.</i>"
     )
+    update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 def status_cmd(update, context):
     update.effective_message.reply_text(f"TRADES_PATH: {TRADES_PATH}")
@@ -181,13 +189,17 @@ def columns_cmd(update, context):
         if df is None or df.empty:
             update.effective_message.reply_text("No CSV loaded.")
             return
-        pcol = _auto_profit_col(df)
-        tcol = _auto_time_col(df)
-        scol = _auto_symbol_col(df)
+        pcol = _auto_profit_col(df); tcol = _auto_time_col(df); scol = _auto_symbol_col(df)
         cols = ", ".join(map(str, df.columns.tolist()))
-        update.effective_message.reply_text(
-            f"Detected profit: {pcol}\\nDetected time: {tcol}\\nDetected symbol: {scol}\\n\\nColumns: {cols}"
+        html = (
+            "<b>🔎 Detected</b>\n"
+            f"• Profit: <code>{pcol}</code>\n"
+            f"• Time: <code>{tcol}</code>\n"
+            f"• Symbol: <code>{scol}</code>\n\n"
+            "<b>Columns</b>\n"
+            f"<pre>{cols}</pre>"
         )
+        update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception as e:
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /columns: {e}")
@@ -200,7 +212,7 @@ def trades_cmd(update, context):
         with open(TRADES_PATH, "rb") as f:
             bio = io.BytesIO(f.read())
         bio.name = os.path.basename(TRADES_PATH)
-        context.bot.send_document(chat_id=update.effective_chat.id, document=bio, filename=bio.name)
+        context.bot.send_document(chat_id=update.effective_chat.id, document=bio, filename=bio.name, caption="Current trades.csv")
     except Exception as e:
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /trades: {e}")
@@ -214,9 +226,7 @@ def summary_cmd(update, context):
         if df is None or df.empty:
             update.effective_message.reply_text("No CSV loaded.")
             return
-        pcol = _auto_profit_col(df)
-        tcol = _auto_time_col(df)
-        scol = _auto_symbol_col(df)
+        pcol = _auto_profit_col(df); tcol = _auto_time_col(df); scol = _auto_symbol_col(df)
         if not pcol:
             update.effective_message.reply_text("Couldn't detect profit column.")
             return
@@ -226,7 +236,7 @@ def summary_cmd(update, context):
         if df2.empty:
             update.effective_message.reply_text("No trades after applying filters.")
             return
-        html = _summary_text(df2, pcol)
+        html = _summary_html(df2, pcol)
         update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception as e:
         traceback.print_exc()
@@ -270,7 +280,7 @@ def on_document(update, context):
         content = f.download_as_bytearray()
         with open(TRADES_PATH, "wb") as fh:
             fh.write(content)
-        update.effective_message.reply_text(f"✅ Saved CSV to {TRADES_PATH}. Use /summary or /graph.")
+        update.effective_message.reply_text("✅ CSV saved. Use /summary or /graph.")
     except Exception as e:
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Failed to save CSV: {e}")
