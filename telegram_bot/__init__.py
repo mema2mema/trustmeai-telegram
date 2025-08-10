@@ -1,6 +1,5 @@
 
 import io, os, traceback, re, math
-from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 from telegram.ext import CommandHandler, MessageHandler, Filters
@@ -25,29 +24,19 @@ SYMBOL_CANDIDATES = [
 ]
 
 def _read_csv_safely(path: str) -> pd.DataFrame:
-    try:
-        df = pd.read_csv(path)
-        return df
-    except Exception:
-        pass
-    try:
-        df = pd.read_csv(path, sep=";")
-        return df
-    except Exception:
-        pass
-    try:
-        df = pd.read_csv(path, encoding="latin-1")
-        return df
-    except Exception as e:
-        raise e
+    for args in ({}, {"sep":";"}, {"encoding":"latin-1"}):
+        try:
+            return pd.read_csv(path, **args)
+        except Exception:
+            continue
+    raise RuntimeError("Failed to read CSV")
 
 def _auto_profit_col(df: pd.DataFrame):
-    cols = [c for c in df.columns]
     for name in PROFIT_CANDIDATES:
-        for c in cols:
+        for c in df.columns:
             if str(c).strip().lower() == name:
                 return c
-    numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     if numeric_cols:
         var = [(c, float(pd.Series(df[c]).fillna(0).std())) for c in numeric_cols]
         var.sort(key=lambda x: x[1], reverse=True)
@@ -66,60 +55,47 @@ def _parse_maybe_datetime(series: pd.Series) -> pd.Series:
     return pd.to_datetime(s, errors="coerce", utc=False)
 
 def _auto_time_col(df: pd.DataFrame):
-    cols = [c for c in df.columns]
     for name in TIME_CANDIDATES:
-        for c in cols:
+        for c in df.columns:
             if str(c).strip().lower() == name:
                 parsed = _parse_maybe_datetime(df[c])
                 if parsed.notna().sum() >= max(3, int(0.5*len(df))):
                     return c
     best = None
     best_ok = -1
-    for c in cols:
+    for c in df.columns:
         parsed = _parse_maybe_datetime(df[c])
         ok = parsed.notna().sum()
         if ok > best_ok:
-            best_ok = ok
-            best = c
+            best_ok = ok; best = c
     if best_ok >= max(3, int(0.3*len(df))):
         return best
     return None
 
 def _auto_symbol_col(df: pd.DataFrame):
-    cols = [c for c in df.columns]
     for name in SYMBOL_CANDIDATES:
-        for c in cols:
+        for c in df.columns:
             if str(c).strip().lower() == name:
                 return c
-    str_cols = [c for c in cols if df[c].dtype == object]
-    best = None
-    best_score = -1
+    str_cols = [c for c in df.columns if df[c].dtype == object]
+    best, best_score = None, -1
     for c in str_cols:
         uniq = df[c].dropna().unique()
         score = 1000 - len(uniq)
         if score > best_score:
-            best = c
-            best_score = score
+            best, best_score = c, score
     return best
-
-def _ensure_equity(df: pd.DataFrame, pcol: str):
-    returns = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
-    equity = returns.cumsum()
-    return equity
 
 def _max_drawdown(series: pd.Series):
     roll_max = series.cummax()
     dd = series - roll_max
-    mdd = dd.min()
-    return float(mdd)
+    return float(dd.min())
 
-def _streaks(x: pd.Series):
-    best_win, best_loss = 0, 0
-    cur = 0
-    last = None
-    for v in x:
+def _streaks(bools):
+    best_win, best_loss, cur, last = 0, 0, 0, None
+    for v in bools:
         s = 1 if v else -1
-        if last is None or (s == 1 and last == 1) or (s == -1 and last == -1):
+        if last is None or s == last:
             cur += s
         else:
             cur = s
@@ -130,37 +106,29 @@ def _streaks(x: pd.Series):
 
 def _parse_args(args_text: str):
     out = {}
-    if not args_text:
-        return out
-    for part in re.split(r"\\s+", args_text.strip()):
-        if "=" in part:
-            k,v = part.split("=", 1)
-            out[k.strip().lower()] = v.strip()
+    if args_text:
+        for part in re.split(r"\s+", args_text.strip()):
+            if "=" in part:
+                k,v = part.split("=", 1)
+                out[k.strip().lower()] = v.strip()
     return out
 
 def _apply_filters(df: pd.DataFrame, args: dict, tcol: str, scol: str):
     if "symbol" in args and scol in df.columns:
         want = args["symbol"].strip().upper()
         df = df[df[scol].astype(str).str.upper() == want]
-
     if "timeframe" in args and tcol in df.columns:
         tf = args["timeframe"].strip().lower()
         now = pd.Timestamp.now(tz=None)
         delta = None
         m = re.match(r"^(\\d+)\\s*([dhwmy])$", tf)
         if m:
-            n = int(m.group(1))
-            unit = m.group(2)
-            if unit == "d":
-                delta = pd.Timedelta(days=n)
-            elif unit == "h":
-                delta = pd.Timedelta(hours=n)
-            elif unit == "w":
-                delta = pd.Timedelta(weeks=n)
-            elif unit == "m":
-                delta = pd.Timedelta(days=30*n)
-            elif unit == "y":
-                delta = pd.Timedelta(days=365*n)
+            n = int(m.group(1)); unit = m.group(2)
+            delta = {"d":pd.Timedelta(days=n),
+                     "h":pd.Timedelta(hours=n),
+                     "w":pd.Timedelta(weeks=n),
+                     "m":pd.Timedelta(days=30*n),
+                     "y":pd.Timedelta(days=365*n)}.get(unit)
         if delta is not None:
             cutoff = now - delta
             tvals = _parse_maybe_datetime(df[tcol])
@@ -169,34 +137,30 @@ def _apply_filters(df: pd.DataFrame, args: dict, tcol: str, scol: str):
 
 def _summary_text(df: pd.DataFrame, pcol: str):
     r = pd.to_numeric(df[pcol], errors="coerce").fillna(0.0).astype(float)
-    total_trades = int(r.shape[0])
-    total_profit = float(r.sum())
-    win_rate = float((r > 0).mean() * 100.0) if total_trades else 0.0
-    avg_profit = float(r.mean()) if total_trades else 0.0
-    best_trade = float(r.max()) if total_trades else 0.0
-    worst_trade = float(r.min()) if total_trades else 0.0
-
+    total = int(r.shape[0])
+    pnl = float(r.sum())
+    win_rate = float((r > 0).mean()*100) if total else 0.0
+    avg = float(r.mean()) if total else 0.0
+    best = float(r.max()) if total else 0.0
+    worst = float(r.min()) if total else 0.0
     wins, losses = _streaks(list(r > 0))
-    equity = r.cumsum()
-    mdd = _max_drawdown(equity)
+    mdd = _max_drawdown(r.cumsum())
 
     lines = [
-        "📊 Summary",
-        f"• Trades: {total_trades}",
-        f"• PnL: {total_profit:.2f}",
-        f"• Win rate: {win_rate:.2f}%",
-        f"• Avg/trade: {avg_profit:.2f}",
-        f"• Best: {best_trade:.2f} | Worst: {worst_trade:.2f}",
-        f"• Max win streak: {wins} | Max loss streak: {losses}",
-        f"• Max drawdown: {mdd:.2f}",
+        "Summary",
+        f"Trades        : {total:>7d}",
+        f"PnL           : {pnl:>7.2f}",
+        f"Win rate      : {win_rate:>6.2f}%",
+        f"Avg/trade     : {avg:>7.2f}",
+        f"Best | Worst  : {best:>7.2f} | {worst:>7.2f}",
+        f"Win/Loss strk : {wins:>3d} / {losses:>3d}",
+        f"Max drawdown  : {mdd:>7.2f}",
     ]
-    return "\\n".join(lines)
+    body = "<b>📊 Performance</b>\\n<pre>" + "\\n".join(lines) + "</pre>"
+    return body
 
 def start(update, context):
-    update.effective_message.reply_text(
-        "TrustMe AI Bot is live ✅\\n"
-        "Send a CSV or use /help"
-    )
+    update.effective_message.reply_text("TrustMe AI Bot is live ✅\\nSend a CSV or use /help")
 
 def help_cmd(update, context):
     update.effective_message.reply_text(
@@ -209,9 +173,7 @@ def help_cmd(update, context):
     )
 
 def status_cmd(update, context):
-    update.effective_message.reply_text(
-        f"TRADES_PATH: {TRADES_PATH}"
-    )
+    update.effective_message.reply_text(f"TRADES_PATH: {TRADES_PATH}")
 
 def columns_cmd(update, context):
     try:
@@ -238,11 +200,7 @@ def trades_cmd(update, context):
         with open(TRADES_PATH, "rb") as f:
             bio = io.BytesIO(f.read())
         bio.name = os.path.basename(TRADES_PATH)
-        context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=bio,
-            filename=bio.name
-        )
+        context.bot.send_document(chat_id=update.effective_chat.id, document=bio, filename=bio.name)
     except Exception as e:
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /trades: {e}")
@@ -264,16 +222,12 @@ def summary_cmd(update, context):
             return
         args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
         args = _parse_args(args_txt)
-
-        df_filtered = df.copy()
-        df_filtered = _apply_filters(df_filtered, args, tcol, scol)
-
-        if df_filtered.empty:
+        df2 = _apply_filters(df.copy(), args, tcol, scol)
+        if df2.empty:
             update.effective_message.reply_text("No trades after applying filters.")
             return
-
-        text = _summary_text(df_filtered, pcol)
-        update.effective_message.reply_text(text)
+        html = _summary_text(df2, pcol)
+        update.effective_message.reply_text(html, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception as e:
         traceback.print_exc()
         update.effective_message.reply_text(f"❌ Error in /summary: {e}")

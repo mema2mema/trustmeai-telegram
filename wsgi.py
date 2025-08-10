@@ -24,7 +24,7 @@ def _handle_webhook():
         return "no json", 400
     req = Request(con_pool_size=8)
     bot = Bot(token=TELEGRAM_BOT_TOKEN, request=req)
-    dispatcher = Dispatcher(bot=bot, update_queue=None, workers=0, use_context=True)
+    dispatcher = Dispatcher(bot=bot, update_queue=None, workers=4, use_context=True)
     register_handlers(dispatcher)
     update = Update.de_json(body, bot)
     dispatcher.process_update(update)
