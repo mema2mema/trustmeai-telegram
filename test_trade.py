@@ -1,12 +1,6 @@
+from telegram_bot import add_trade
 
-import os
-from telegram import Bot
-
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")  # your chat id
-if not TOKEN or not CHAT_ID:
-    raise SystemExit("Set TOKEN and CHAT_ID env vars")
-
-bot = Bot(TOKEN)
-bot.send_message(chat_id=CHAT_ID, text="🚀 Test alert from TrustMe AI")
-print("Sent")
+# Example mock trade (fires a Telegram alert and saves to data/trades.csv)
+# Run:  python test_trade.py
+add_trade("BUY", "BTC/USDT", 28800.50, 1.25)
+print("Mock trade sent.")
