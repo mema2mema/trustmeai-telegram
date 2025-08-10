@@ -1,5 +1,4 @@
-
 param(
-    [Parameter(Mandatory=$true)][string]$BASE # e.g. https://your-app.up.railway.app
+  [Parameter(Mandatory=$true)] [string]$BASE
 )
-Invoke-WebRequest -Uri "$BASE/health" -UseBasicParsing | Select-Object -ExpandProperty StatusCode
+Invoke-WebRequest -Uri "$BASE" -Method Get | Select-Object -ExpandProperty StatusCode

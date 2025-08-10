@@ -25,19 +25,16 @@ SYMBOL_CANDIDATES = [
 ]
 
 def _read_csv_safely(path: str) -> pd.DataFrame:
-    # Try default
     try:
         df = pd.read_csv(path)
         return df
     except Exception:
         pass
-    # Try ; separator
     try:
         df = pd.read_csv(path, sep=";")
         return df
     except Exception:
         pass
-    # Try latin-1
     try:
         df = pd.read_csv(path, encoding="latin-1")
         return df
@@ -46,15 +43,12 @@ def _read_csv_safely(path: str) -> pd.DataFrame:
 
 def _auto_profit_col(df: pd.DataFrame):
     cols = [c for c in df.columns]
-    # name priority
     for name in PROFIT_CANDIDATES:
         for c in cols:
             if str(c).strip().lower() == name:
                 return c
-    # numeric fallback
     numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
     if numeric_cols:
-        # pick the most variable numeric column
         var = [(c, float(pd.Series(df[c]).fillna(0).std())) for c in numeric_cols]
         var.sort(key=lambda x: x[1], reverse=True)
         return var[0][0]
@@ -62,7 +56,6 @@ def _auto_profit_col(df: pd.DataFrame):
 
 def _parse_maybe_datetime(series: pd.Series) -> pd.Series:
     s = series.copy()
-    # numeric epoch
     if pd.api.types.is_numeric_dtype(s):
         median = float(pd.Series(s).dropna().median()) if s.notna().any() else 0.0
         unit = "ms" if median > 1e12 else "s"
@@ -70,19 +63,16 @@ def _parse_maybe_datetime(series: pd.Series) -> pd.Series:
             return pd.to_datetime(s, unit=unit, errors="coerce")
         except Exception:
             return pd.to_datetime(s, errors="coerce")
-    # string date
     return pd.to_datetime(s, errors="coerce", utc=False)
 
 def _auto_time_col(df: pd.DataFrame):
     cols = [c for c in df.columns]
-    # named preference
     for name in TIME_CANDIDATES:
         for c in cols:
             if str(c).strip().lower() == name:
                 parsed = _parse_maybe_datetime(df[c])
                 if parsed.notna().sum() >= max(3, int(0.5*len(df))):
                     return c
-    # try each column; pick with most parsed
     best = None
     best_ok = -1
     for c in cols:
@@ -101,13 +91,12 @@ def _auto_symbol_col(df: pd.DataFrame):
         for c in cols:
             if str(c).strip().lower() == name:
                 return c
-    # Heuristic: short strings with few unique values
     str_cols = [c for c in cols if df[c].dtype == object]
     best = None
     best_score = -1
     for c in str_cols:
         uniq = df[c].dropna().unique()
-        score = 1000 - len(uniq)  # fewer uniques preferred
+        score = 1000 - len(uniq)
         if score > best_score:
             best = c
             best_score = score
@@ -140,12 +129,6 @@ def _streaks(x: pd.Series):
     return best_win, -best_loss
 
 def _parse_args(args_text: str):
-    """
-    Parse strings like:
-      symbol=BTC timeframe=7d
-      timeframe=30d
-    Returns dict.
-    """
     out = {}
     if not args_text:
         return out
@@ -156,12 +139,10 @@ def _parse_args(args_text: str):
     return out
 
 def _apply_filters(df: pd.DataFrame, args: dict, tcol: str, scol: str):
-    # Symbol filter
     if "symbol" in args and scol in df.columns:
         want = args["symbol"].strip().upper()
         df = df[df[scol].astype(str).str.upper() == want]
 
-    # Timeframe filter: Nd, Nw, Nm, Ny, Nh
     if "timeframe" in args and tcol in df.columns:
         tf = args["timeframe"].strip().lower()
         now = pd.Timestamp.now(tz=None)
@@ -284,7 +265,6 @@ def summary_cmd(update, context):
         args_txt = " ".join(context.args) if getattr(context, "args", None) else ""
         args = _parse_args(args_txt)
 
-        # Filters
         df_filtered = df.copy()
         df_filtered = _apply_filters(df_filtered, args, tcol, scol)
 
